@@ -29,7 +29,7 @@ class BaseDataset(Dataset, ABC):
 
     default_input_format = 'plain'
     default_output_format = None
-    default_data_dir = 'data'
+    default_data_dir = '/users/zyong2/data/zyong2/tanl/data/external/tanl/data'
 
     def __init__(
             self,
