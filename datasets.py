@@ -374,6 +374,88 @@ class ADEDataset(JointERDataset):
         """
         return super().evaluate_dataset(*args, **kwargs, macro=True)
 
+@register_dataset
+class ADEDatasetFewShot(JointERDataset):
+    """
+    ADE dataset (joint entity and relation extraction).
+
+    Downloaded using https://github.com/markus-eberts/spert/blob/master/scripts/fetch_datasets.sh
+    """
+    name = 'ade_fewshot'
+    data_name = "ade"
+
+    natural_entity_types = {
+        'Adverse-Effect': 'disease',
+        'Drug': 'drug',
+    }
+
+    natural_relation_types = {
+        'Adverse-Effect': 'effect',
+    }
+
+    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
+        """
+        Load data for a single split (train, dev, or test).
+
+        We decide which split to use based on the seed.
+        In this way, running episodes 1-10 has the effect of running on all 10 different splits once.
+
+        k-shot:  
+        (1) All labels within the domain should appear at least k times. 
+        (2) At least one label will appear less than k times in S if any (x, y) pair is removed from it.
+        """
+        if seed is None:
+            i = 0
+        else:
+            i = seed % 10
+
+        if split == 'train':
+            from collections import Counter
+            import random
+
+            k_labels = Counter()
+            for natural_entity_type in ADEDatasetFewShot.natural_entity_types.values():
+                k_labels[natural_entity_type] = 0
+            for natural_relation_type in ADEDatasetFewShot.natural_relation_types.values():
+                k_labels[natural_relation_type] = 0
+            
+
+            data = super().load_data_single_split(f'split_{i}_train', seed)
+            random.Random(i).shuffle(data)  # shuffle with seed i
+
+            num_shots = self.data_args.num_shots
+            kshot_examples = list()
+            for example in data:
+                for entity in example.entities:
+                    if entity.type.natural not in k_labels:
+                        raise TypeError
+                    k_labels[entity.type.natural] += 1
+                for relation in example.relations:
+                    if relation.type.natural not in k_labels:
+                        raise TypeError
+                    k_labels[relation.type.natural] += 1
+
+                kshot_examples.append(example)
+                if k_labels.most_common()[-1][1] >= num_shots:
+                    break
+               
+            logging.info(f"Few-shot: Loaded {len(kshot_examples)} examples with label counter {k_labels}")
+            return kshot_examples
+
+        elif split == 'dev':
+            return []
+
+        elif split == 'test':
+            return super().load_data_single_split(f'split_{i}_test', seed)
+
+    def evaluate_dataset(self, *args, **kwargs):
+        """
+        Evaluate model on this dataset.
+
+        We include the macro entity scores, since it is standard to report them.
+        """
+        return super().evaluate_dataset(*args, **kwargs, macro=True)
+
 
 @register_dataset
 class NYTDataset(JointERDataset):
