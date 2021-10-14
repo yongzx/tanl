@@ -24,12 +24,12 @@ from utils import get_episode_indices
 
 
 def main():
-    assert torch.cuda.is_available(), 'CUDA not available'
+    # assert torch.cuda.is_available(), 'CUDA not available'
 
     # parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('job')
-    parser.add_argument('-c', '--config_file', type=str, default='config.ini', help='configuration file')
+    parser.add_argument('-c', '--config_file', type=str, default='/users/zyong2/data/zyong2/tanl/data/external/tanl/config.ini', help='configuration file')
     parser.add_argument('-e', '--eval', action='store_true', default=False, help='run evaluation only')
     parser.add_argument('--evaluate_checkpoints', action='store_true', default=False,
                         help='evaluate intermediate checkpoints instead of the final model')
@@ -48,6 +48,7 @@ def main():
     config = configparser.ConfigParser(allow_no_value=False)
     config.read(args.config_file)
     job = args.job
+    print(args, config)
     assert job in config
 
     # set defaults for other arguments
@@ -79,6 +80,13 @@ def main():
     second_parser.set_defaults(**defaults)
     model_args, data_args, training_args = second_parser.parse_args_into_dataclasses(remaining_args)
 
+    print("***** Training Arguments *****")
+    print(training_args)
+    print("***** Data Arguments *****")
+    print(data_args)
+    print("***** Model Arguments *****")
+    print(model_args)
+    
     try:
         os.mkdir(training_args.output_dir)
     except FileExistsError:
