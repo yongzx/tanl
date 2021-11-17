@@ -1,15 +1,21 @@
 # TANL: Structured Prediction as Translation between Augmented Natural Languages
 
-#### Setup for BigScience Biomedical Track
-1. Clone this repo (branch: `dev-bigscience-med`)
-2. If there is any changes to Natasha's dataloader/, copy and paste the entire dataloader/ folder to `tanl/pybrat_dataloader`.
-3. Put the custom dataset into the folder `tanl/data`. Change the `default_data_dir` variable in `tanl/base_dataset.py` to point to the absolute path of `tanl/data`.
-4. Do the necessary pip installation from this repo `tanl/requirements.txt` and Natasha's repo.
+## Setup for BigScience Biomedical Track
+1. Clone this repo (branch: `dev-bigscience-med`) and `cd tanl/`.
+2. If there is any changes to Natasha's `dataloader/`, replace `./pybrat_dataloader/` with Natasha's `dataloader/`.
+3. Put the custom dataset into the folder `./data`. Change the `default_data_dir` variable in `./base_dataset.py` to point to the absolute path of `./data`.
+4. Do the necessary pip installation from this repo `./requirements.txt` and Natasha's repo.
+5. Note that you need to use Python 3.9+ because of dependencies from Natasha's repo.
 
-#### Usage for Training
+## Usage for Training
 Read through original TANL creators' README down below. 
 
-For training DDI, a simple code is `python3 /users/zyong2/data/zyong2/bigscience-med/data/external/tanl/run.py ddi --output_dir=OUTPUT_DIR`.
+For training DDI, a simple code is 
+```
+python3 ./run.py \
+ddi \
+--output_dir="some_output_dir"
+```
 
 
 ---
