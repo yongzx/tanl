@@ -106,7 +106,23 @@ class BaseDataset(Dataset, ABC):
             # compute effective size of the dataset
             self.effective_size = round(train_subset * len(self.examples))
             if train_subset != 1:
-                logging.info(f"Effective dataset size reduced to {self.effective_size} ({train_subset * 100:.0f}%)")
+                logging.info(f"Effective dataset size of {self.name} reduced to {self.effective_size} ({train_subset * 100:.0f}%)")
+
+                # verbose statistics
+                if self.name in ("conll04"):
+                    entities_count = dict()
+                    for i in range(self.effective_size):
+                        example = self.get_example(i)
+                        for entity in example.entities:
+                            entities_count[entity.type.natural] = entities_count.get(entity.type.natural, 0) + 1
+                    logging.info(f"Entities count: {entities_count}")
+
+                    relations_count = dict()
+                    for i in range(self.effective_size):
+                        example = self.get_example(i)
+                        for relation in example.relations:
+                            relations_count[relation.type.natural] = relations_count.get(relation.type.natural, 0) + 1
+                    logging.info(f"Relation count: {relations_count}")
 
     def __repr__(self):
         return f'Dataset {self.name}'

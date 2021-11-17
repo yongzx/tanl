@@ -26,6 +26,16 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={"help": "Zero-shot setting"}
     )
 
+    prefix_tuning: bool = field(
+        default=False,
+        metadata={"help": "Prefix Tuning"}
+    )
+
+    adapter_tuning: bool = field(
+        default=False,
+        metadata={"help": "Adapter Tuning"}
+    )
+
 
 @dataclass
 class ModelArguments:

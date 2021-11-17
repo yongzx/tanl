@@ -9,7 +9,7 @@ import numpy as np
 from transformers import PreTrainedTokenizer
 
 from arguments import DataTrainingArguments
-from datasets import load_dataset
+from tanl_datasets import load_dataset
 
 
 def get_avg_results(results: List[dict]) -> dict:
@@ -42,6 +42,8 @@ def print_results(results: dict):
             s += f'{value}'
 
         logging.info(s)
+        print(key, s)
+            
 
 
 def evaluate(model, dataset_name: str, data_args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, split: str,

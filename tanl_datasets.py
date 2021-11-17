@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
+import datasets
 import bisect
 import copy
 import os
@@ -24,6 +24,7 @@ from coreference_metrics import CorefAllMetrics
 from input_formats import INPUT_FORMATS
 from output_formats import OUTPUT_FORMATS
 
+from pybrat_dataloader import BioDataset
 DATASETS = {}
 
 
@@ -143,6 +144,21 @@ class JointERDataset(BaseDataset):
 
                 examples.append(example)
 
+        if split in ("dev", "test"):
+            logging.info(f"Label Statistics of {split} of {self.name}")
+            entities_count = dict()
+            for i in range(len(examples)):
+                example = examples[i]
+                for entity in example.entities:
+                    entities_count[entity.type.natural] = entities_count.get(entity.type.natural, 0) + 1
+            logging.info(f"{split} Entities count: {entities_count}")
+
+            relations_count = dict()
+            for i in range(len(examples)):
+                example = examples[i]
+                for relation in example.relations:
+                    relations_count[relation.type.natural] = relations_count.get(relation.type.natural, 0) + 1
+            logging.info(f"{split} Relation count: {relations_count}")
         return examples
 
     def evaluate_example(self, example: InputExample, output_sentence: str, model=None, tokenizer=None) -> Counter:
@@ -150,12 +166,14 @@ class JointERDataset(BaseDataset):
         Evaluate an output sentence on a single example of this dataset.
         """
         # extract entities and relations from output sentence
+
         res = self.output_format.run_inference(
             example,
             output_sentence,
             entity_types=self.entity_types,
             relation_types=self.relation_types,
-        )
+        )  ## ({('organization', 2, 3)}, set(), False, False, False, False)
+        
         predicted_entities, predicted_relations = res[:2]
         if len(res) == 6:
             # the output format provides information about errors
@@ -169,7 +187,7 @@ class JointERDataset(BaseDataset):
         # load ground truth entities
         gt_entities = set(entity.to_tuple() for entity in example.entities)
         gt_entities_no_type = set([entity[1:] for entity in gt_entities])
-
+        
         # compute correct entities
         correct_entities = predicted_entities & gt_entities
         correct_entities_no_type = gt_entities_no_type & predicted_entities_no_type
@@ -226,13 +244,14 @@ class JointERDataset(BaseDataset):
 
         return res
 
-    def evaluate_dataset(self, data_args: DataTrainingArguments, model, device, batch_size: int, macro: bool = False) \
+    def evaluate_dataset(self, data_args: DataTrainingArguments, model, device, batch_size: int, macro: bool = True) \
             -> Dict[str, float]:
         """
         Evaluate model on this dataset.
         """
         results = Counter()
 
+        count = 0
         for example, output_sentence in self.generate_output_sentences(data_args, model, device, batch_size):
             new_result = self.evaluate_example(
                     example=example,
@@ -241,6 +260,10 @@ class JointERDataset(BaseDataset):
                     tokenizer=self.tokenizer,
                 )
             results += new_result
+            if count < 5:
+                logging.info(f"\n\n🎯 Input sentence: {' '.join(example.tokens)}")
+                logging.info(f"🤖 Labeled sentence: {output_sentence}")
+            count += 1
 
         entity_precision, entity_recall, entity_f1 = get_precision_recall_f1(
             num_correct=results['correct_entities'],
@@ -257,19 +280,35 @@ class JointERDataset(BaseDataset):
         entity_precision_by_type = []
         entity_recall_by_type = []
         entity_f1_by_type = []
+        relation_precision_by_type = []
+        relation_recall_by_type = []
+        relation_f1_by_type = []
 
         if macro:
             # compute also entity macro scores
-            for entity_type in self.entity_types.values():
-                precision, recall, f1 = get_precision_recall_f1(
-                    num_correct=results['correct_entities', entity_type.natural],
-                    num_predicted=results['predicted_entities', entity_type.natural],
-                    num_gt=results['gt_entities', entity_type.natural],
-                )
-                entity_precision_by_type.append(precision)
-                entity_recall_by_type.append(recall)
-                entity_f1_by_type.append(f1)
+            if self.entity_types is not None:
+                for entity_type in self.entity_types.values():
+                    precision, recall, f1 = get_precision_recall_f1(
+                        num_correct=results['correct_entities', entity_type.natural],
+                        num_predicted=results['predicted_entities', entity_type.natural],
+                        num_gt=results['gt_entities', entity_type.natural],
+                    )
+                    entity_precision_by_type.append(precision)
+                    entity_recall_by_type.append(recall)
+                    entity_f1_by_type.append(f1)
 
+            if self.relation_types is not None:
+                for relation_type in self.relation_types.values():
+                    precision, recall, f1 = get_precision_recall_f1(
+                        num_correct=results['correct_relations', relation_type.natural],
+                        num_predicted=results['predicted_relations', relation_type.natural],
+                        num_gt=results['gt_relations', relation_type.natural],
+                    )
+                    relation_precision_by_type.append(precision)
+                    relation_recall_by_type.append(recall)
+                    relation_f1_by_type.append(f1)
+
+        
         relation_precision, relation_recall, relation_f1 = get_precision_recall_f1(
             num_correct=results['correct_relations'],
             num_predicted=results['predicted_relations'],
@@ -297,10 +336,122 @@ class JointERDataset(BaseDataset):
                 'entity_macro_precision': np.mean(np.array(entity_precision_by_type)),
                 'entity_macro_recall': np.mean(np.array(entity_recall_by_type)),
                 'entity_macro_f1': np.mean(np.array(entity_f1_by_type)),
+                'relation_macro_precision': np.mean(np.array(relation_precision_by_type)),
+                'relation_macro_recall': np.mean(np.array(relation_recall_by_type)),
+                'relation_macro_f1': np.mean(np.array(relation_f1_by_type)),
             })
+
+            if self.entity_types is not None:
+                for i, entity_type in enumerate(self.entity_types.values()):
+                    res[f"entity_{entity_type.natural}_precision"] = entity_precision_by_type[i]
+                    res[f"entity_{entity_type.natural}_recall"] = entity_recall_by_type[i]
+                    res[f"entity_{entity_type.natural}_f1"] = entity_f1_by_type[i]
+
+            if self.relation_types is not None:
+                for i, relation_type in enumerate(self.relation_types.values()):
+                    res[f"relation_{relation_type.natural}_precision"] = relation_precision_by_type[i]
+                    res[f"relation_{relation_type.natural}_recall"] = relation_recall_by_type[i]
+                    res[f"relation_{relation_type.natural}_f1"] = relation_f1_by_type[i]
 
         return res
 
+########################################################################
+########################################################################
+
+@register_dataset
+class DDIDataset(JointERDataset):
+    """
+    ADE dataset (joint entity and relation extraction).
+
+    Downloaded using https://github.com/markus-eberts/spert/blob/master/scripts/fetch_datasets.sh
+    """
+    name = 'ddi'
+    data_name = "DDICorpusBrat"
+
+    # FIXME: change entity types and relation types
+    natural_entity_types = {}
+
+    natural_relation_types = {}
+
+    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
+        """
+        Load data for a single split (train, dev, or test).
+
+        We decide which split to use based on the seed.
+        In this way, running episodes 1-10 has the effect of running on all 10 different splits once.
+        """
+        examples = []
+        data_root = os.path.join(self.default_data_dir, "DDICorpusBrat")
+        dataset = BioDataset(dataset="ddi", 
+                             data_root=data_root, 
+                             split_names={"train": "Train", "test": "Test"}, 
+                             fmt="brat")
+        
+        self.natural_entity_types = dataset.natural_entity_types
+        self.natural_relation_types = dataset.natural_relation_types
+        self.load_schema()
+
+        if split == "train":
+            data = dataset.data.train[:int(len(dataset.data.train)*0.8)]
+        elif split == "dev":
+            data = dataset.data.train[int(len(dataset.data.train)*0.8):]
+        elif split == "test":
+            data = dataset.data.test
+
+        for i, x in enumerate(data):
+            entities = [
+                Entity(id=j, type=self.entity_types[y.type], start=y.tanl_start, end=y.tanl_end)
+                for j, y in enumerate(x.entities)
+            ]
+            
+            relations = [
+                Relation(
+                    type=self.relation_types[y.type], head=entities[y.tanl_head], tail=entities[y.tanl_tail]
+                )
+                for y in x.relations
+            ]
+
+            tokens = x.tokens
+
+            example = InputExample(
+                id=f'{split}-{i}',
+                tokens=tokens,
+                entities=entities,
+                relations=relations,
+            )
+
+            examples.append(example)
+        
+        ### label statistics
+        logging.info(f"Label Statistics of {split} of {self.name}")
+        entities_count = dict()
+        for i in range(len(examples)):
+            example = examples[i]
+            for entity in example.entities:
+                entities_count[entity.type.natural] = entities_count.get(entity.type.natural, 0) + 1
+        logging.info(f"{split} Entities count: {entities_count}")
+
+        relations_count = dict()
+        for i in range(len(examples)):
+            example = examples[i]
+            for relation in example.relations:
+                relations_count[relation.type.natural] = relations_count.get(relation.type.natural, 0) + 1
+        logging.info(f"{split} Relation count: {relations_count}")
+        
+        return examples
+
+    def evaluate_dataset(self, *args, **kwargs):
+        """
+        Evaluate model on this dataset.
+
+        We include the macro entity scores, since it is standard to report them.
+        """
+        return super().evaluate_dataset(*args, **kwargs, macro=True)
+
+
+
+########################################################################
+########################################################################
 
 @register_dataset
 class Conll04Dataset(JointERDataset):
@@ -326,6 +477,67 @@ class Conll04Dataset(JointERDataset):
         'Located_In': 'located in'
     }
 
+@register_dataset
+class Conll04DatasetFewShot(Conll04Dataset):
+    """
+    CoNLL04 dataset (joint entity and relation extraction).
+
+    Downloaded using https://github.com/markus-eberts/spert/blob/master/scripts/fetch_datasets.sh
+    """
+    name = "conll04_fewshot"
+    data_name = 'conll04'
+
+    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
+        """
+        Load data for a single split (train, dev, or test).
+
+        This is the default implementation for datasets in the SpERT format
+        (see https://github.com/markus-eberts/spert).
+        """
+        data = super().load_data_single_split(split, seed)
+
+        if split == "train":
+            from collections import Counter
+            import random
+
+            random.Random(seed).shuffle(data)  # shuffle with seed
+
+            k_entity_labels = Counter()
+            for natural_entity_type in self.natural_entity_types.values():
+                k_entity_labels[natural_entity_type] = 0
+            k_relation_labels = Counter()
+            for natural_relation_type in self.relation_types.values():
+                k_relation_labels[natural_relation_type.natural] = 0
+
+            num_shots = self.data_args.num_shots
+            kshot_examples = list()
+            for example in data:
+                include_example = False
+                for entity in example.entities:
+                    if entity.type.natural not in k_entity_labels:
+                        raise TypeError
+                    if k_entity_labels[entity.type.natural] < num_shots:
+                        include_example = True
+                    
+                for relation in example.relations:
+                    if relation.type.natural not in k_relation_labels:
+                        raise TypeError
+                    if k_relation_labels[relation.type.natural] < num_shots:
+                        include_example = True
+                
+                if include_example:
+                    for entity in example.entities:
+                        k_entity_labels[entity.type.natural] += 1
+                    for relation in example.relations:
+                        k_relation_labels[relation.type.natural] += 1
+                    kshot_examples.append(example)
+
+                if k_entity_labels.most_common()[-1][1] >= num_shots and k_relation_labels.most_common()[-1][1] >= num_shots:
+                    break
+               
+            logging.info(f"Few-shot: Loaded {len(kshot_examples)} examples with entity counter \n {k_entity_labels} \nand relation counter \n {k_relation_labels}")
+            return kshot_examples
+        return data
 
 @register_dataset
 class ADEDataset(JointERDataset):
@@ -414,9 +626,9 @@ class ADEDatasetFewShot(JointERDataset):
             import random
 
             k_labels = Counter()
-            for natural_entity_type in ADEDatasetFewShot.natural_entity_types.values():
+            for natural_entity_type in self.natural_entity_types.values():
                 k_labels[natural_entity_type] = 0
-            for natural_relation_type in ADEDatasetFewShot.natural_relation_types.values():
+            for natural_relation_type in self.natural_relation_types.values():
                 k_labels[natural_relation_type] = 0
             
 
@@ -550,6 +762,67 @@ class NYTDataset(JointERDataset):
                 examples.append(example)
 
         return examples
+
+
+@register_dataset
+class NYTDatasetFewShot(NYTDataset):
+    """
+    NYT dataset (joint entity and relation extraction).
+
+    Downloaded from https://github.com/yubowen-ph/JointER/tree/master/dataset/NYT-multi/data
+    """
+    name = 'nyt_fewshot'
+    data_name = "nyt"
+
+    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
+        """
+        Load data for a single split (train, dev, or test).
+        """
+        data = super().load_data_single_split(split, seed)
+
+        if split == "train":
+            from collections import Counter
+            import random
+
+            random.Random(seed).shuffle(data)  # shuffle with seed
+
+            k_entity_labels = Counter()
+            for natural_entity_type in self.natural_entity_types.values():
+                k_entity_labels[natural_entity_type] = 0
+            k_relation_labels = Counter()
+            for natural_relation_type in self.relation_types.values():
+                k_relation_labels[natural_relation_type.natural] = 0
+
+            num_shots = self.data_args.num_shots
+            kshot_examples = list()
+            for example in data:
+                include_example = False
+                for entity in example.entities:
+                    if entity.type.natural not in k_entity_labels:
+                        raise TypeError
+                    if k_entity_labels[entity.type.natural] < num_shots:
+                        include_example = True
+                    
+                for relation in example.relations:
+                    if relation.type.natural not in k_relation_labels:
+                        raise TypeError
+                    if k_relation_labels[relation.type.natural] < num_shots:
+                        include_example = True
+                
+                if include_example:
+                    for entity in example.entities:
+                        k_entity_labels[entity.type.natural] += 1
+                    for relation in example.relations:
+                        k_relation_labels[relation.type.natural] += 1
+                    kshot_examples.append(example)
+
+                if k_entity_labels.most_common()[-1][1] >= num_shots and k_relation_labels.most_common()[-1][1] >= num_shots:
+                    break
+               
+            logging.info(f"Few-shot: Loaded {len(kshot_examples)} examples with entity counter \n {k_entity_labels} \nand relation counter \n {k_relation_labels}")
+            return kshot_examples
+        
+        return data
 
 
 @register_dataset
@@ -725,7 +998,7 @@ class NERDataset(JointERDataset):
 
         return examples
 
-    def evaluate_dataset(self, data_args: DataTrainingArguments, model, device, batch_size: int, macro: bool = False) \
+    def evaluate_dataset(self, data_args: DataTrainingArguments, model, device, batch_size: int, macro: bool = True) \
             -> Dict[str, float]:
         """
         Evaluate model on this dataset, and return entity metrics only.
@@ -747,6 +1020,91 @@ class CoNLL03Dataset(NERDataset):
         'ORG': 'organization',
         'PER': 'person',
     }
+
+@register_dataset
+class CoNLL03HFDataset(NERDataset):
+    """
+    CoNLL03 dataset (NER).
+    """
+    name = 'conll03_hf'
+    dataname = 'conll03'
+
+    natural_entity_types = {
+        'LOC': 'location',
+        'MISC': 'miscellaneous',
+        'ORG': 'organization',
+        'PER': 'person',
+    }
+
+    hf_to_entity_types = {
+        0: None,
+        1: "B-PER",
+        2: "I-PER",
+        3: "B-ORG",
+        4: "I-ORG",
+        5: "B-LOC",
+        6: "I-LOC",
+        7: "B-MISC",
+        8: "I-MISC"
+    }
+
+    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
+        """
+        Load data for a single split (train, dev, or test).
+        """
+        split = {'train': 'train', "dev": 'validation', "test":"test"}[split]
+        raw_examples = datasets.load_dataset("conll2003", cache_dir="/users/zyong2/data/zyong2/tanl/data/external/hf")[split]
+        logging.info(f"Loaded {len(raw_examples)} sentences for split {split} of {self.name}")
+        
+        examples = []
+        for i, raw_example in enumerate(raw_examples):
+            tokens = raw_example['tokens']
+            labels = raw_example['ner_tags']
+            labels = list(map(self.hf_to_entity_types.get, labels))
+
+            # process labels
+            entities = []
+
+            current_entity_start = None
+            current_entity_type = None
+
+            for j, label in enumerate(labels + [None]):
+                previous_label = labels[j-1] if j > 0 else None
+                if (label is None and previous_label is not None) \
+                        or (label is not None and previous_label is None) \
+                        or (label is not None and previous_label is not None and (
+                            label[2:] != previous_label[2:] or label.startswith('B-') or label.startswith('S-')
+                        )):
+                    if current_entity_start is not None:
+                        # close current entity
+                        entities.append(Entity(
+                            id=len(entities),
+                            type=self.entity_types[current_entity_type],
+                            start=current_entity_start,
+                            end=j,
+                        ))
+
+                        current_entity_start = None
+                        current_entity_type = None
+
+                    if label is not None:
+                        # a new entity begins
+                        current_entity_start = j
+                        assert any(label.startswith(f'{prefix}-') for prefix in 'BIS')
+                        current_entity_type = label[2:]
+                        assert current_entity_type in self.entity_types
+
+            example = InputExample(
+                id=f'{split}-{i}',
+                tokens=tokens,
+                entities=entities,
+                relations=[],
+            )
+
+            examples.append(example)
+
+        return examples
+
 
 
 @register_dataset

@@ -18,9 +18,10 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, AutoModelForSeq2SeqLM, Trainer
 
 from arguments import ModelArguments, DataTrainingArguments, TrainingArguments
-from datasets import load_dataset
+from tanl_datasets import load_dataset
 from evaluate import evaluate, get_avg_results, print_results
 from utils import get_episode_indices
+# from custom_models.bart_with_adapter import BartWithAdapterConfig, MyBartWithAdapter
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     # parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('job')
-    parser.add_argument('-c', '--config_file', type=str, default='/users/zyong2/data/zyong2/tanl/data/external/tanl/config.ini', help='configuration file')
+    parser.add_argument('-c', '--config_file', type=str, default='/users/zyong2/data/zyong2/bigscience-med/data/external/tanl/config.ini', help='configuration file')
     parser.add_argument('-e', '--eval', action='store_true', default=False, help='run evaluation only')
     parser.add_argument('--evaluate_checkpoints', action='store_true', default=False,
                         help='evaluate intermediate checkpoints instead of the final model')
@@ -48,7 +49,8 @@ def main():
     config = configparser.ConfigParser(allow_no_value=False)
     config.read(args.config_file)
     job = args.job
-    print(args, config)
+    print(job)
+    print("config:", config)
     assert job in config
 
     # set defaults for other arguments
@@ -57,7 +59,8 @@ def main():
         'overwrite_cache': True,
         'per_device_eval_batch_size': 4,
         'learning_rate': 5e-4,
-        'logging_steps': 0,     # do not log by default
+        "logging_strategy": "steps",
+        'logging_steps': 500,     # do not log by default # I want to log
         'save_steps': 0,        # do not save checkpoints by default
     }
 
@@ -86,7 +89,7 @@ def main():
     print(data_args)
     print("***** Model Arguments *****")
     print(model_args)
-    
+
     try:
         os.mkdir(training_args.output_dir)
     except FileExistsError:
@@ -120,6 +123,7 @@ def main():
     output_dir = os.path.join(
         training_args.output_dir,
         f'{args.job}'
+        f'{"-eval" if args.eval else ""}'
         f'-{model_args.model_name_or_path.split("/")[-1]}'
         f'-ep{round(training_args.num_train_epochs)}'
         f'-len{data_args.max_seq_length}'
@@ -203,7 +207,17 @@ def main():
 
         # load pretrained model
         model = None
-        if training_args.zero_shot or training_args.do_train:
+        # if training_args.prefix_tuning:
+        #     logging.info(f"🔥 Using model {model_args.model_name_or_path} for prefix tuning")
+        #     model = PrefixTuningBart(model_name=model_args.model_name_or_path, 
+        #                              cache_dir=model_args.cache_dir)
+
+        if training_args.adapter_tuning:
+            logging.info(f"🔥 Using model {model_args.model_name_or_path} for adapter tuning")
+            config = BartWithAdapterConfig.from_pretrained(model_args.model_name_or_path)
+            model = MyBartWithAdapter(config)
+
+        elif training_args.zero_shot or training_args.do_train:
             logging.info(f"Using model {model_args.model_name_or_path}")
             model = AutoModelForSeq2SeqLM.from_pretrained(
                 model_args.model_name_or_path,
@@ -212,7 +226,16 @@ def main():
             )
 
         # fine-tune the model
-        if training_args.do_train:
+        if training_args.zero_shot:
+            logging.info("Zero-shot: saving model ckpt")
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+            )
+            # save model parameters
+            trainer.save_model(episode_output_dir)
+
+        elif training_args.do_train:
             # load train dataset
             datasets = []
             for dataset_name in dataset_names:
@@ -225,7 +248,7 @@ def main():
                 datasets.append(dataset)
 
             train_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
-
+            
             # construct trainer
             trainer = Trainer(
                 model=model,
@@ -235,12 +258,15 @@ def main():
 
             # start trainer
             logging.info('Start training')
-            trainer.train(
-                model_path=model_args.model_name_or_path
-            )
+            # trainer.train(
+            #     model_path=model_args.model_name_or_path
+            # )
+            trainer.train()
 
             # save model parameters
             trainer.save_model(episode_output_dir)
+            
+
         
         # run evaluation
         if training_args.local_rank in [-1, 0] and (training_args.do_eval or training_args.do_predict):
@@ -285,6 +311,11 @@ def main():
                 split, evaluation_dir, dataset_name = comb
                 model_dir = os.path.join(episode_output_dir, evaluation_dir)
 
+                # YONG:
+                if args.eval:
+                    logging.info(f"Only evaluation on model '{model_args.model_name_or_path}'")
+                    model_dir = model_args.model_name_or_path
+
                 if args.evaluate_checkpoints or args.evaluate_last_checkpoint or args.evaluate_all or model is None:
                     # we need to load the model
                     model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -301,6 +332,7 @@ def main():
                     model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
                     seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
                 )
+
                 # store results
                 evaluation_results[comb].append(res)
 
