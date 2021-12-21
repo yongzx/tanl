@@ -29,7 +29,7 @@ class BaseDataset(Dataset, ABC):
 
     default_input_format = 'plain'
     default_output_format = None
-    default_data_dir = 'data'
+    default_data_dir = '/users/zyong2/data/zyong2/ws/data/external/tanl_datasets'
 
     def __init__(
             self,
@@ -49,6 +49,7 @@ class BaseDataset(Dataset, ABC):
             # set random seed for repeatability
             random.seed(seed)
 
+        self.seed = seed
         self.data_args = data_args
         self.tokenizer = tokenizer
 
@@ -67,46 +68,55 @@ class BaseDataset(Dataset, ABC):
         self.is_eval = is_eval
         self.eval_nll = data_args.eval_nll
 
+        self.mode = mode
+        self.local_rank = local_rank
+        self.overwrite_cache = overwrite_cache
+        self.train_subset = train_subset
+        self.shuffle = shuffle
+
+        self.load_data_init()
+
+    def load_data_init(self):
         cached_data_file = os.path.join(
             self.data_dir(),
-            f"cached_{self.name}_{mode}_{tokenizer.__class__.__name__}_{max_input_length}_{max_output_length}"
-            f"{'_multitask' if data_args.multitask else ''}.pth"
+            f"cached_{self.name}_{self.mode}_{self.tokenizer.__class__.__name__}_{self.max_input_length}_{self.max_output_length}"
+            f"{'_multitask' if self.data_args.multitask else ''}.pth"
         )
 
-        with torch_distributed_zero_first(local_rank):
+        with torch_distributed_zero_first(self.local_rank):
             # make sure only the first process in distributed training processes the dataset,
             # and the others can use the cached version
 
-            if os.path.exists(cached_data_file) and not overwrite_cache:
+            if os.path.exists(cached_data_file) and not self.overwrite_cache:
                 self.load_cached_data(cached_data_file)
 
             else:
                 self.load_schema()   # here the dataset can load information such as entity/relation types
-                self.examples = self.load_data(mode=mode, seed=seed)
+                self.examples = self.load_data(mode=self.mode, seed=self.seed)
 
                 # assign examples to this dataset
                 for example in self.examples:
                     example.dataset = self
 
                 self.features = self.compute_features(
-                    max_input_length=max_input_length,
-                    max_output_length=max_output_length,
-                    multitask=data_args.multitask,
+                    max_input_length=self.max_input_length,
+                    max_output_length=self.max_output_length,
+                    multitask=self.data_args.multitask,
                 )
 
-                if local_rank in [-1, 0]:
+                if self.local_rank in [-1, 0]:
                     # save data
                     self.save_data(cached_data_file)
 
             # shuffle indices
             self.indices = list(range(len(self.examples)))
-            if seed is not None and shuffle:
+            if self.seed is not None and self.shuffle:
                 random.shuffle(self.indices)
 
             # compute effective size of the dataset
-            self.effective_size = round(train_subset * len(self.examples))
-            if train_subset != 1:
-                logging.info(f"Effective dataset size reduced to {self.effective_size} ({train_subset * 100:.0f}%)")
+            self.effective_size = round(self.train_subset * len(self.examples))
+            if self.train_subset != 1:
+                logging.info(f"Effective dataset size reduced to {self.effective_size} ({self.train_subset * 100:.0f}%)")
 
     def __repr__(self):
         return f'Dataset {self.name}'
@@ -244,3 +254,146 @@ class BaseDataset(Dataset, ABC):
         Evaluate model on this dataset, returning the task-relevant metrics.
         """
         pass
+
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+######################################################################################################################################################################################
+
+
+class NoisyBaseDataset(BaseDataset):
+    def __init__(self, top_k_noisy_seq,
+                 *args, **kwargs):
+        self.top_k_noisy_seq = top_k_noisy_seq
+        super().__init__(*args, **kwargs)
+        
+    def load_data_init(self):
+        if self.mode == "train":
+            cached_data_file = os.path.join(
+                self.data_dir(),
+                f"cached_{self.name}_noise{self.top_k_noisy_seq}_{self.mode}_{self.tokenizer.__class__.__name__}_{self.max_input_length}_{self.max_output_length}"
+                f"{'_multitask' if self.data_args.multitask else ''}.pth"
+            )
+
+            with torch_distributed_zero_first(self.local_rank):
+                # make sure only the first process in distributed training processes the dataset,
+                # and the others can use the cached version
+
+                if os.path.exists(cached_data_file) and not self.overwrite_cache:
+                    self.load_cached_data(cached_data_file)
+
+                else:
+                    self.load_schema()   # here the dataset can load information such as entity/relation types
+                    self.examples = self.load_data(mode=self.mode, seed=self.seed, top_k_noisy_seq=self.top_k_noisy_seq)
+
+                    # assign examples to this dataset
+                    for example in self.examples:
+                        example.dataset = self
+
+                    self.features = self.compute_features(
+                        max_input_length=self.max_input_length,
+                        max_output_length=self.max_output_length,
+                        multitask=self.data_args.multitask,
+                    )
+
+                    if self.local_rank in [-1, 0]:
+                        # save data
+                        self.save_data(cached_data_file)
+
+                # shuffle indices
+                self.indices = list(range(len(self.examples)))
+                if self.seed is not None and self.shuffle:
+                    random.shuffle(self.indices)
+
+                # compute effective size of the dataset
+                self.effective_size = round(self.train_subset * len(self.examples))
+                if self.train_subset != 1:
+                    logging.info(f"Effective dataset size reduced to {self.effective_size} ({self.train_subset * 100:.0f}%)")
+        else:
+            super().load_data_init()
+
+    def load_data(self, mode: str, seed: int = None, top_k_noisy_seq: int = 1) -> List[InputExample]:
+        """
+        Load all data, where 'mode' is a list of comma-separated splits to use.
+        """
+        examples = []
+
+        if isinstance(mode, str):
+            splits = mode.split(',')
+        else:
+            assert isinstance(mode, (list, tuple))
+            splits = mode
+
+        for split in splits:
+            examples += self.load_data_single_split(split, seed=seed, top_k_noisy_seq=top_k_noisy_seq)
+
+        return examples
+    
+    def compute_features(self, max_input_length: int, max_output_length: int, multitask: bool = False):
+        input_sentences = [self.input_format.format_input(example, multitask=multitask) for example in self.examples]
+        output_sentences = list()
+        noisy_output_sentences = list()
+        noisy_output_sentences_weights = list()
+        for example in self.examples:
+            output = self.output_format.format_output(example)
+            output_sentences.append(output['output_sentence'])
+            if output['top_k_noisy_output_sentences']:
+                assert len(output['top_k_noisy_output_sentences']) == len(example.top_k_noise_weights)
+                noisy_output_sentences.append(output['top_k_noisy_output_sentences'])
+                noisy_output_sentences_weights.append(example.top_k_noise_weights)
+
+        input_tok = self.tokenizer.batch_encode_plus(
+            input_sentences,
+            max_length=max_input_length,
+            return_tensors='pt',
+            padding='max_length',
+            truncation=True,
+        )
+        self._warn_max_sequence_length(max_input_length, input_sentences, "input")
+
+        output_tok = self.tokenizer.batch_encode_plus(
+            output_sentences,
+            max_length=max_output_length,
+            return_tensors='pt',
+            padding='max_length',
+            truncation=True,
+        )
+        self._warn_max_sequence_length(max_output_length, output_sentences, "output")
+        
+        assert input_tok.input_ids.size(0) == output_tok.input_ids.size(0)
+
+        features = []
+        for sentence_input_ids, att_mask, label_input_ids in zip(input_tok.input_ids, input_tok.attention_mask,
+                                                                 output_tok.input_ids):
+            label_ids = label_input_ids.tolist()
+            features.append(InputFeatures(
+                input_ids=sentence_input_ids.tolist(),
+                attention_mask=att_mask.tolist(),
+                label_ids=label_ids
+            ))
+
+        # if noisy
+        if noisy_output_sentences:
+            self.input_ids_to_noisy_output_ids = dict()
+            for i, input_ids in enumerate(input_tok['input_ids']):
+                self.input_ids_to_noisy_output_ids[tuple(input_ids.tolist())] = \
+                    (self.tokenizer.batch_encode_plus(
+                        noisy_output_sentences[i],
+                        max_length=max_output_length,
+                        return_tensors='pt',
+                        padding='max_length',
+                        truncation=True,
+                    ).input_ids, # list of top k sequences of token_ids
+                    noisy_output_sentences_weights[i]) # weights for each sequence
+        else:
+            self.input_ids_to_noisy_output_ids = None
+        return features
+        
+
+        

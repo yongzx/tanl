@@ -9,7 +9,7 @@ import numpy as np
 from transformers import PreTrainedTokenizer
 
 from arguments import DataTrainingArguments
-from datasets import load_dataset
+from tanl_datasets import load_dataset
 
 
 def get_avg_results(results: List[dict]) -> dict:

@@ -26,6 +26,16 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={"help": "Zero-shot setting"}
     )
 
+@dataclass
+class NoiseAwareArguments:
+    """
+    Arguments for the Trainer.
+    """
+    top_k_noisy_seq: int = field(
+        default=1,
+        metadata={"help": "top k sequence of labels."}
+    )
+
 
 @dataclass
 class ModelArguments:
@@ -73,6 +83,11 @@ class DataTrainingArguments:
 
     train_split: str = field(
         default='train',
+        metadata={"help": "The datasplit for training. Can be 'train', 'dev', 'test', etc."}
+    )
+
+    val_split: str = field(
+        default='dev',
         metadata={"help": "The datasplit for training. Can be 'train', 'dev', 'test', etc."}
     )
 

@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, AutoModelForSeq2SeqLM, Trainer
 
-from arguments import ModelArguments, DataTrainingArguments, TrainingArguments
+from arguments import ModelArguments, DataTrainingArguments, TrainingArguments, NoiseAwareArguments
 from tanl_datasets import load_dataset
 from evaluate import evaluate, get_avg_results, print_results
 from utils import get_episode_indices
@@ -78,15 +78,17 @@ def main():
         defaults['do_train'] = False
 
     # parse remaining arguments and divide them into three categories
-    second_parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    second_parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, NoiseAwareArguments))
     second_parser.set_defaults(**defaults)
-    model_args, data_args, training_args = second_parser.parse_args_into_dataclasses(remaining_args)
+    model_args, data_args, training_args, noise_aware_args = second_parser.parse_args_into_dataclasses(remaining_args)
     print("=== model_args ===")
     print(model_args)
     print("=== data_args ===")
     print(data_args)
     print("=== training_args ===")
     print(training_args)
+    print("=== noise_aware_args ===")
+    print(noise_aware_args)
 
     try:
         os.mkdir(training_args.output_dir)
@@ -121,6 +123,7 @@ def main():
     output_dir = os.path.join(
         training_args.output_dir,
         f'{args.job}'
+        f'-noise_seq{noise_aware_args.top_k_noisy_seq}'
         f'-{model_args.model_name_or_path.split("/")[-1]}'
         f'-ep{round(training_args.num_train_epochs)}'
         f'-len{data_args.max_seq_length}'
@@ -217,15 +220,14 @@ def main():
             # load train dataset
             datasets = []
             for dataset_name in dataset_names:
-                logging.info(f'Process dataset {dataset_name} (train)')
-                dataset = load_dataset(
+                logging.info(f'Process noisy dataset {dataset_name} (train)')
+                noise_dataset = load_dataset(
                     dataset_name, data_args, split=data_args.train_split,
                     max_input_length=data_args.max_seq_length, max_output_length=data_args.max_output_seq_length,
-                    tokenizer=tokenizer, seed=ep_idx, train_subset=data_args.train_subset,
+                    tokenizer=tokenizer, seed=ep_idx, train_subset=data_args.train_subset, top_k_noisy_seq=noise_aware_args.top_k_noisy_seq
                 )
-                datasets.append(dataset)
+                datasets.append(noise_dataset)
             train_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
-            
             # logging.info(tokenizer.convert_ids_to_tokens(train_dataset[1].input_ids))
             # logging.info(tokenizer.convert_ids_to_tokens(train_dataset[1].label_ids))
 
@@ -241,8 +243,63 @@ def main():
                 datasets.append(dataset)
             eval_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
 
-            # construct trainer
-            trainer = Trainer(
+            class NoiseAwareTrainer(Trainer):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.debug_flag = False
+
+                def compute_noise_aware_loss(self, model, inputs):
+                    noise_aware_loss = 0.
+                    for input_ids_per_sent in inputs['input_ids']:
+                        loss_per_sent = 0.
+                        top_k_label_ids, weights = noise_dataset.input_ids_to_noisy_output_ids[tuple(input_ids_per_sent.tolist())]
+                        for label_ids, weight in zip(top_k_label_ids, weights):
+                            outputs = model(input_ids=torch.unsqueeze(input_ids_per_sent, dim=0), 
+                                            labels=torch.unsqueeze(label_ids, dim=0).to(input_ids_per_sent.device))
+                            
+                            # loss_per_sent += weight * outputs.loss # FIXME: weight is unnormalized log prob.
+                            # total_weights += weight
+                            # loss_per_sent += torch.exp(torch.as_tensor(weight)) * outputs.loss # FIXME: overflow
+                            # total_weights += torch.exp(torch.as_tensor(weight)) # FIXME: overflow
+                            if not self.debug_flag:
+                                # output the training sentence to see what it looks like
+                                print("label_ids:", tokenizer.decode(label_ids.tolist(), skip_special_tokens=True))
+                            loss_per_sent += torch.exp(weight + torch.log(outputs.loss) - torch.logsumexp(torch.Tensor(weights), 0))
+                            
+                        noise_aware_loss += loss_per_sent
+                    self.debug_flag = True
+                    return noise_aware_loss
+
+                def training_step(self, model, inputs):
+                    # override transformers/trainer.py training_step function
+                    model.train()
+                    inputs = self._prepare_inputs(inputs)
+
+                    with self.autocast_smart_context_manager():
+                        loss = self.compute_noise_aware_loss(model, inputs)
+
+                    if self.args.n_gpu > 1:
+                        loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+                    if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
+                        # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
+                        loss = loss / self.args.gradient_accumulation_steps
+
+                    if self.do_grad_scaling:
+                        self.scaler.scale(loss).backward()
+                    # elif self.use_apex:
+                    #     with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    #         scaled_loss.backward()
+                    # elif self.deepspeed:
+                    #     # loss gets scaled under gradient_accumulation_steps in deepspeed
+                    #     loss = self.deepspeed.backward(loss)
+                    else:
+                        loss.backward()
+
+                    return loss.detach()
+
+            # *args, **kwargs
+            trainer = NoiseAwareTrainer(
                 model=model,
                 args=training_args,
                 train_dataset=train_dataset,

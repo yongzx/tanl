@@ -82,6 +82,10 @@ class InputExample:
     tokens: List[str]           # list of tokens (words)
     dataset: Optional[Dataset] = None   # dataset this example belongs to
 
+    # noisy
+    top_k_noisy_entities: List[List[Entity]] = None
+    top_k_noise_weights: List[List[float]] = None
+
     # entity-relation extraction
     entities: List[Entity] = None      # list of entities
     relations: List[Relation] = None   # list of relations

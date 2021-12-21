@@ -254,8 +254,30 @@ class JointEROutputFormat(BaseOutputFormat):
                 entity.end,
             ))
 
-        return augment_sentence(example.tokens, augmentations, self.BEGIN_ENTITY_TOKEN, self.SEPARATOR_TOKEN,
-                                self.RELATION_SEPARATOR_TOKEN, self.END_ENTITY_TOKEN)
+        output_sentence = augment_sentence(example.tokens, augmentations, self.BEGIN_ENTITY_TOKEN, 
+                                           self.SEPARATOR_TOKEN, self.RELATION_SEPARATOR_TOKEN, self.END_ENTITY_TOKEN)
+
+        top_k_noisy_output_sentences = None
+        if example.top_k_noisy_entities:
+            top_k_noisy_output_sentences = list()
+            for noisy_entities in example.top_k_noisy_entities:
+                relations_by_entity = {entity: [] for entity in noisy_entities}
+                # for relation in example.relations: ### TODO: noisy relations
+                #     relations_by_entity[relation.head].append((relation.type, relation.tail))
+                augmentations = []
+                for entity in noisy_entities:
+                    tags = [(entity.type.natural,)]
+                    for relation_type, tail in relations_by_entity[entity]:
+                        tags.append((relation_type.natural, ' '.join(example.tokens[tail.start:tail.end])))
+
+                    augmentations.append((
+                        tags,
+                        entity.start,
+                        entity.end,
+                    ))
+                top_k_noisy_output_sentences.append(augment_sentence(example.tokens, augmentations, self.BEGIN_ENTITY_TOKEN, 
+                                 self.SEPARATOR_TOKEN, self.RELATION_SEPARATOR_TOKEN, self.END_ENTITY_TOKEN))
+        return {"output_sentence": output_sentence, "top_k_noisy_output_sentences": top_k_noisy_output_sentences}
 
     def run_inference(self, example: InputExample, output_sentence: str,
                       entity_types: Dict[str, EntityType] = None, relation_types: Dict[str, RelationType] = None) \
