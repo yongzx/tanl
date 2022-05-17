@@ -25,6 +25,8 @@ from coreference_metrics import CorefAllMetrics
 from input_formats import INPUT_FORMATS
 from output_formats import OUTPUT_FORMATS
 
+from labelmodels import LinkedHMM
+
 DATASETS = {}
 
 
@@ -42,26 +44,48 @@ def load_dataset(
         max_output_length: int,
         train_subset: float = 1,
         seed: int = None,
-        shuffle: bool = True,
+        shuffle: bool = False,
         is_eval: bool = False,
-        top_k_noisy_seq: int = 1
+        noisy_dir_name: str = None,
+        inputs_fp: str = None,
+        viterbi_paths_fp: str = None,
+        viterbi_scores_fp: str = None,
+        top_k_noisy_seq: int = None,
 ):
     """
     Load a registered dataset.
     """
-    return DATASETS[dataset_name](
-        tokenizer=tokenizer,
-        max_input_length=max_input_length,
-        max_output_length=max_output_length,
-        mode=split,
-        overwrite_cache=data_args.overwrite_cache,
-        train_subset=train_subset,
-        seed=seed,
-        shuffle=shuffle,
-        data_args=data_args,
-        is_eval=is_eval,
-        top_k_noisy_seq=top_k_noisy_seq
-    )
+    if "noisy" in dataset_name:
+        return DATASETS[dataset_name](
+            tokenizer=tokenizer,
+            max_input_length=max_input_length,
+            max_output_length=max_output_length,
+            mode=split,
+            overwrite_cache=data_args.overwrite_cache,
+            train_subset=train_subset,
+            seed=seed,
+            shuffle=shuffle,
+            data_args=data_args,
+            is_eval=is_eval,
+            noisy_dir_name=noisy_dir_name,
+            inputs_fp=inputs_fp,
+            viterbi_paths_fp=viterbi_paths_fp,
+            viterbi_scores_fp=viterbi_scores_fp,
+            top_k_noisy_seq=top_k_noisy_seq
+        )
+    else:
+        return DATASETS[dataset_name](
+            tokenizer=tokenizer,
+            max_input_length=max_input_length,
+            max_output_length=max_output_length,
+            mode=split,
+            overwrite_cache=data_args.overwrite_cache,
+            train_subset=train_subset,
+            seed=seed,
+            shuffle=shuffle,
+            data_args=data_args,
+            is_eval=is_eval
+        )
 
 
 class JointERDataset(BaseDataset):
@@ -236,7 +260,11 @@ class JointERDataset(BaseDataset):
         """
         results = Counter()
 
-        for example, output_sentence in self.generate_output_sentences(data_args, model, device, batch_size):
+        for i, (example, output_sentence) in enumerate(self.generate_output_sentences(data_args, model, device, batch_size)):
+            if i in [0, 1, 2, 3, 4]:
+                logging.info(f"Example: {example}")
+                logging.info(f"output_sentence: {output_sentence}")
+                
             new_result = self.evaluate_example(
                     example=example,
                     output_sentence=output_sentence,
@@ -715,7 +743,7 @@ class OntonotesSRLDataset(NERDataset):
         """
         Load data for a single split (train, dev, or test).
         """
-        file_path = f"{self.data_dir()}/ontonotes_srl_data.pt"
+        file_path = f"{self.data_dir()}/reduced_ontonotes_srl_data_no_allennlp.pt"
         data = torch.load(file_path)
 
         raw_examples = []
@@ -769,7 +797,6 @@ class OntonotesSRLDataset(NERDataset):
             )
 
             examples.append(example)
-
         return examples
 
 
@@ -2728,7 +2755,7 @@ class NoisyJointERDataset(NoisyBaseDataset):
         results = Counter()
 
         for i, (example, output_sentence) in enumerate(self.generate_output_sentences(data_args, model, device, batch_size)):
-            if i % 1000 == 0:
+            if i in [0, 1, 2, 3, 4]:
                 logging.info(f"Example: {example}")
                 logging.info(f"output_sentence: {output_sentence}")
 
@@ -2804,108 +2831,11 @@ class NoisyNERDataset(NoisyJointERDataset):
     Base class for NER datasets.
     """
 
-    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
-        """
-        Load data for a single split (train, dev, or test).
-        """
-        file_path = os.path.join(self.data_dir(), f'{split}.txt')
+    natural_entity_types = ...
+    num2labels = ...
+    label_2_entity_types = ...
 
-        raw_examples = []
-        tokens = []
-        labels = []
-        with open(file_path, 'r') as f:
-            for line in f:
-                if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                    if tokens:
-                        raw_examples.append((tokens, labels))
-                        tokens = []
-                        labels = []
-                else:
-                    splits = line.split()
-                    tokens.append(splits[0])
-                    if len(splits) > 1:
-                        label = splits[-1].strip()
-                        if label == 'O':
-                            label = None
-                        labels.append(label)
-                    else:
-                        labels.append(None)
-
-            if tokens:
-                raw_examples.append((tokens, labels))
-
-        logging.info(f"Loaded {len(raw_examples)} sentences for split {split} of {self.name}")
-
-        examples = []
-        for i, (tokens, labels) in enumerate(raw_examples):
-            assert len(tokens) == len(labels)
-
-            # process labels
-            entities = []
-
-            current_entity_start = None
-            current_entity_type = None
-
-            for j, label in enumerate(labels + [None]):
-                previous_label = labels[j-1] if j > 0 else None
-                if (label is None and previous_label is not None) \
-                        or (label is not None and previous_label is None) \
-                        or (label is not None and previous_label is not None and (
-                            label[2:] != previous_label[2:] or label.startswith('B-') or label.startswith('S-')
-                        )):
-                    if current_entity_start is not None:
-                        # close current entity
-                        entities.append(Entity(
-                            id=len(entities),
-                            type=self.entity_types[current_entity_type],
-                            start=current_entity_start,
-                            end=j,
-                        ))
-
-                        current_entity_start = None
-                        current_entity_type = None
-
-                    if label is not None:
-                        # a new entity begins
-                        current_entity_start = j
-                        assert any(label.startswith(f'{prefix}-') for prefix in 'BIS')
-                        current_entity_type = label[2:]
-                        assert current_entity_type in self.entity_types
-
-            example = InputExample(
-                id=f'{split}-{i}',
-                tokens=tokens,
-                entities=entities,
-                relations=[],
-            )
-
-            examples.append(example)
-
-        return examples
-
-    def evaluate_dataset(self, data_args: DataTrainingArguments, model, device, batch_size: int, macro: bool = False) \
-            -> Dict[str, float]:
-        """
-        Evaluate model on this dataset, and return entity metrics only.
-        """
-        results = super().evaluate_dataset(data_args, model, device, batch_size, macro=macro)
-        return {k: v for k, v in results.items() if k.startswith('entity') and k != 'entity_error'}
-
-
-@register_dataset
-class NoisyOntonotesSRLDataset(NoisyNERDataset):
-    """
-    Ontonotes dataset (SRL).
-    """
-    name = 'noisy_ontonotes_srl'
-
-    natural_entity_types = {
-        'ARG0': 'arg0',
-        'ARG1': 'arg1',
-        'ARGM-NEG': 'argm-neg'
-    }
-    
-    def load_data_single_split(self, split: str, seed: int = None, top_k_noisy_seq: int = None) -> List[InputExample]:
+    def load_data_single_split(self, split: str, seed: int = None, inputs_fp: str = None, viterbi_paths_fp: str = None, viterbi_scores_fp: str = None) -> List[InputExample]:
         """
         Load data for a single split (train, dev, or test).
         """
@@ -2913,30 +2843,48 @@ class NoisyOntonotesSRLDataset(NoisyNERDataset):
         data = torch.load(file_path)
 
         raw_examples = []
-        examples_to_noisy_outputs = list()
+        examples_to_noisy_outputs = []
         if split != 'train':
             for instance in data:
                 # instance['tags'] are the gold labels
                 tokens, labels = instance['tokens'], instance['tags']
-                labels = [label if label != "O" else None for label in labels]
+                labels = [self.label_2_entity_types[label] for label in labels]
                 raw_examples.append((tokens, labels))
         else:
-            idx2labels = {0: None, 1: 'I-ARG1', 2: 'I-ARG0', 3: 'I-ARGM-NEG'}
-            logging.info(f"💥 Noise-aware: viterbi_decode with top_k_noisy_seq = {top_k_noisy_seq}")
-            for instance in data:
-                viterbi_paths, viterbi_scores = viterbi_decode(torch.Tensor(instance['unary_marginals']), 
-                                                               torch.Tensor(instance['pairwise_marginals']),
-                                                               top_k_noisy_seq)
-                viterbi_paths = [[idx2labels[lab] for lab in path] for path in viterbi_paths]
+            label_votes, link_votes, seq_starts = torch.load(inputs_fp)
+
+            # get viterbi paths and viterbi scores for all instances
+            viterbi_paths = torch.load(viterbi_paths_fp)  # (topk, token_lengths_from_all_instances)
+            viterbi_scores = torch.load(viterbi_scores_fp)  # (topk, instances)
+            assert viterbi_paths.shape[0] == viterbi_scores.shape[0]
+            assert viterbi_scores.shape[1] == len(data)
+            logging.info(f"Viterbi Paths loaded from {viterbi_scores_fp}")
+            
+            # get K viterbi paths and viterbi scores for each instance
+            # TODO: if -1 exists in viterbi paths, remove the particular path from being added to the examples_to_noisy_outputs
+            logging.info(f"💥 Noise-aware setting")
+            for i, instance in enumerate(data):
+                seq_start = seq_starts[i]
+                seq_end = seq_starts[i + 1] if i + 1 < len(seq_starts) else viterbi_paths.shape[1]
+                
+                paths = viterbi_paths[:, seq_start:seq_end]
+                scores = viterbi_scores[:, i]
+                assert paths.shape[1] == len(instance['tags'])
+
+                paths = [[self.num2labels[lab] for lab in path] for path in paths if -1 not in path]
+                scores = [score for score in scores if score != -1]
+                assert len(paths) == len(scores)
+
+                # examples_to_noisy_outputs[i] = [{}, {}, ...] 
                 examples_to_noisy_outputs.append([{"viterbi_path": path, 
                                                    "viterbi_score": score.item()} 
-                                                   for path, score in zip(viterbi_paths, viterbi_scores)])
+                                                   for path, score in zip(paths, scores)])
+                # print(len(paths), len(scores))             
+                
+                tokens, labels = instance['tokens'], instance['tags']
+                labels = [self.label_2_entity_types[label] for label in labels]  # done in self.num2labels
+                raw_examples.append((tokens, labels)) # labels here are gold labels
 
-                tokens, labels = instance['tokens'], viterbi_paths[0]
-                # labels = [label if label != "O" else None for label in labels]  # done in idx2labels
-                raw_examples.append((tokens, labels))
-        
-        raw_examples = raw_examples
         logging.info(f"Loaded {len(raw_examples)} sentences for split {split} of {self.name}")
         
         examples = []
@@ -2974,14 +2922,17 @@ class NoisyOntonotesSRLDataset(NoisyNERDataset):
                         assert any(label.startswith(f'{prefix}-') for prefix in 'BIS')
                         current_entity_type = label[2:]
                         assert current_entity_type in self.entity_types
-
-            top_k_noisy_entities = None
-            top_k_noise_weights = None
+            
+            # has noisy labels (train split)
             if examples_to_noisy_outputs:
-                top_k_noisy_entities = []
-                top_k_noise_weights = []
-                for d in examples_to_noisy_outputs[i]:
-                    labels = d['viterbi_path']
+                total_noise_weight = [each_noisy_output['viterbi_score'] for each_noisy_output in examples_to_noisy_outputs[i]]
+                total_LSE_noise_weight = torch.logsumexp(torch.Tensor(total_noise_weight), 0).item()
+                
+                # process noisy examples
+                # each example has a maximum of K outputs
+                for each_noisy_output in examples_to_noisy_outputs[i]:
+                    labels = each_noisy_output['viterbi_path']
+                    weight = each_noisy_output['viterbi_score']
                     noisy_entities = []
 
                     current_entity_start = None
@@ -3012,16 +2963,93 @@ class NoisyOntonotesSRLDataset(NoisyNERDataset):
                                 assert any(label.startswith(f'{prefix}-') for prefix in 'BIS')
                                 current_entity_type = label[2:]
                                 assert current_entity_type in self.entity_types
-                    top_k_noisy_entities.append(noisy_entities)
-                    top_k_noise_weights.append(d['viterbi_score'])
 
-            example = InputExample(
-                id=f'{split}-{i}',
-                tokens=tokens,
-                entities=entities,
-                relations=[],
-                top_k_noisy_entities=top_k_noisy_entities,
-                top_k_noise_weights=top_k_noise_weights
-            )
-            examples.append(example)
+                    example = InputExample(
+                        id=f'{split}-{i}',
+                        tokens=tokens,
+                        entities=noisy_entities, # replace with entities (for gold tags)
+                        gold_entities=entities,
+                        relations=[],
+                        noise_weight=weight,
+                        total_LSE_noise_weight=total_LSE_noise_weight
+                    )
+
+                    examples.append(example)
+            else:
+                example = InputExample(
+                    id=f'{split}-{i}',
+                    tokens=tokens,
+                    entities=entities, # replace with entities (for gold tags)
+                    relations=[]
+                )
+                examples.append(example)
+        logging.info(f"Processed {len(examples)} examples for split {split} of {self.name}")
         return examples
+
+    def evaluate_dataset(self, data_args: DataTrainingArguments, model, device, batch_size: int, macro: bool = False) \
+            -> Dict[str, float]:
+        """
+        Evaluate model on this dataset, and return entity metrics only.
+        """
+        results = super().evaluate_dataset(data_args, model, device, batch_size, macro=macro)
+        return {k: v for k, v in results.items() if k.startswith('entity') and k != 'entity_error'}
+
+
+@register_dataset
+class NoisyOntonotesSRLDataset(NoisyNERDataset):
+    """
+    Ontonotes dataset (SRL).
+    """
+    name = 'noisy_ontonotes_srl'
+
+    natural_entity_types = {
+        'ARG0': 'arg0',
+        'ARG1': 'arg1',
+        'ARGM-NEG': 'argm-neg'
+    }
+    num2labels = {1: None, 2: 'I-ARG1', 3: 'I-ARG0', 4: 'I-ARGM-NEG'}
+    label_2_entity_types = {'I-ARG1': 'I-ARG1', 'I-ARG0': 'I-ARG0', 'I-ARGM-NEG': 'I-ARGM-NEG', 'O': None}
+
+@register_dataset
+class NoisyLaptopDataset(NoisyNERDataset):
+    """
+    Laptop Reviews dataset.
+    """
+    name = 'noisy_laptop'
+
+    natural_entity_types = {
+        'Laptop': 'laptop',
+    }
+
+    num2labels = {1: 'I-Laptop', 2: None}
+    label_2_entity_types = {'O': None, 'I': "I-Laptop", 'B': "B-Laptop"}
+
+
+@register_dataset
+class NoisyNCBIDataset(NoisyNERDataset):
+    """
+    NCBI dataset.
+    """
+    name = 'noisy_ncbi'
+
+    natural_entity_types = {
+        'Disease': 'disease',
+    }
+
+    label_2_entity_types = {'O': None, 'I': "I-Disease", 'B': "B-Disease"}
+    num2labels = {1: 'I-Disease', 2: None}
+
+@register_dataset
+class NoisyCDRDataset(NoisyNERDataset):
+    """
+    BC5CDR dataset.
+    """
+    name = 'noisy_cdr'
+
+    natural_entity_types = {
+        'Chemical': 'chemical',
+        'Disease': 'disease',
+    }
+    
+    num2labels = {1: 'I-Chemical', 2: 'I-Disease', 3: None}
+    label_2_entity_types = {'I-Disease': 'I-Disease', 'I-Chemical': 'I-Chemical', 'O': None, 'B-Disease': 'B-Disease', 'B-Chemical': 'B-Chemical'}

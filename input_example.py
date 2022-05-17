@@ -83,11 +83,12 @@ class InputExample:
     dataset: Optional[Dataset] = None   # dataset this example belongs to
 
     # noisy
-    top_k_noisy_entities: List[List[Entity]] = None
-    top_k_noise_weights: List[List[float]] = None
+    noise_weight: float = None
+    total_LSE_noise_weight: float = None  # log-sum-exp of the noise weights
 
     # entity-relation extraction
     entities: List[Entity] = None      # list of entities
+    gold_entities: List[Entity] = None # list of entities
     relations: List[Relation] = None   # list of relations
     intent: Optional[Intent] = None
 
@@ -106,6 +107,10 @@ class InputExample:
     # DST
     belief_state: Union[Dict[str, Any], str] = None
     utterance_tokens: str = None
+
+    def __hash__(self):
+        hash_tokens = [hash(tok) for tok in self.tokens]
+        return tuple([hash(self.id)] + hash_tokens)
 
 
 @dataclass

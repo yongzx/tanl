@@ -31,10 +31,37 @@ class NoiseAwareArguments:
     """
     Arguments for the Trainer.
     """
+
+    noisy_dir_name: str = field(
+        default="",
+        metadata={"help": "name for output dir"}
+    )
+
+    inputs_fp: str = field(
+        default="",
+        metadata={"help": "path to files such as link_hmm_inputs"}
+    )
+
+    viterbi_paths_fp: str = field(
+        default="",
+        metadata={"help": "path to viterbi paths"}
+    )
+
+    viterbi_scores_fp: str = field(
+        default="",
+        metadata={"help": "path to viterbi scores"}
+    )
+
     top_k_noisy_seq: int = field(
         default=1,
         metadata={"help": "top k sequence of labels."}
     )
+
+    when_call_backward: int = field(
+        default=40,
+        metadata={"help": "gradient accumulation within compute_noise_aware_loss function"}
+    )
+
 
 
 @dataclass

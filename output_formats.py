@@ -256,28 +256,29 @@ class JointEROutputFormat(BaseOutputFormat):
 
         output_sentence = augment_sentence(example.tokens, augmentations, self.BEGIN_ENTITY_TOKEN, 
                                            self.SEPARATOR_TOKEN, self.RELATION_SEPARATOR_TOKEN, self.END_ENTITY_TOKEN)
+        result_dict = {"output_sentence": output_sentence}
 
-        top_k_noisy_output_sentences = None
-        if example.top_k_noisy_entities:
-            top_k_noisy_output_sentences = list()
-            for noisy_entities in example.top_k_noisy_entities:
-                relations_by_entity = {entity: [] for entity in noisy_entities}
-                # for relation in example.relations: ### TODO: noisy relations
-                #     relations_by_entity[relation.head].append((relation.type, relation.tail))
-                augmentations = []
-                for entity in noisy_entities:
-                    tags = [(entity.type.natural,)]
-                    for relation_type, tail in relations_by_entity[entity]:
-                        tags.append((relation_type.natural, ' '.join(example.tokens[tail.start:tail.end])))
+        ## for noise-aware
+        if example.gold_entities is not None:
+            relations_by_entity = {gold_entity: [] for gold_entity in example.gold_entities}
+            for relation in example.relations:
+                relations_by_entity[relation.head].append((relation.type, relation.tail))
+            augmentations = []
+            for gold_entity in example.gold_entities:
+                tags = [(gold_entity.type.natural,)]
+                for relation_type, tail in relations_by_entity[gold_entity]:
+                    tags.append((relation_type.natural, ' '.join(example.tokens[tail.start:tail.end])))
 
-                    augmentations.append((
-                        tags,
-                        entity.start,
-                        entity.end,
-                    ))
-                top_k_noisy_output_sentences.append(augment_sentence(example.tokens, augmentations, self.BEGIN_ENTITY_TOKEN, 
-                                 self.SEPARATOR_TOKEN, self.RELATION_SEPARATOR_TOKEN, self.END_ENTITY_TOKEN))
-        return {"output_sentence": output_sentence, "top_k_noisy_output_sentences": top_k_noisy_output_sentences}
+                augmentations.append((
+                    tags,
+                    gold_entity.start,
+                    gold_entity.end,
+                ))
+            gold_output_sentence = augment_sentence(example.tokens, augmentations, self.BEGIN_ENTITY_TOKEN, 
+                                                    self.SEPARATOR_TOKEN, self.RELATION_SEPARATOR_TOKEN, self.END_ENTITY_TOKEN)
+            result_dict['gold_output_sentence'] = gold_output_sentence
+
+        return result_dict
 
     def run_inference(self, example: InputExample, output_sentence: str,
                       entity_types: Dict[str, EntityType] = None, relation_types: Dict[str, RelationType] = None) \

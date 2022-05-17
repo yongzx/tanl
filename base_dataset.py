@@ -17,6 +17,7 @@ from arguments import DataTrainingArguments
 from input_example import InputFeatures, InputExample
 from input_formats import INPUT_FORMATS
 from output_formats import OUTPUT_FORMATS
+import collections
 
 
 class BaseDataset(Dataset, ABC):
@@ -186,7 +187,7 @@ class BaseDataset(Dataset, ABC):
 
     def compute_features(self, max_input_length: int, max_output_length: int, multitask: bool = False):
         input_sentences = [self.input_format.format_input(example, multitask=multitask) for example in self.examples]
-        output_sentences = [self.output_format.format_output(example) for example in self.examples]
+        output_sentences = [self.output_format.format_output(example)['output_sentence'] for example in self.examples]
 
         input_tok = self.tokenizer.batch_encode_plus(
             input_sentences,
@@ -268,8 +269,12 @@ class BaseDataset(Dataset, ABC):
 
 
 class NoisyBaseDataset(BaseDataset):
-    def __init__(self, top_k_noisy_seq,
+    def __init__(self, noisy_dir_name, inputs_fp, viterbi_paths_fp, viterbi_scores_fp, top_k_noisy_seq,
                  *args, **kwargs):
+        self.noisy_dir_name = noisy_dir_name
+        self.inputs_fp = inputs_fp
+        self.viterbi_paths_fp = viterbi_paths_fp
+        self.viterbi_scores_fp = viterbi_scores_fp
         self.top_k_noisy_seq = top_k_noisy_seq
         super().__init__(*args, **kwargs)
         
@@ -277,7 +282,7 @@ class NoisyBaseDataset(BaseDataset):
         if self.mode == "train":
             cached_data_file = os.path.join(
                 self.data_dir(),
-                f"cached_{self.name}_noise{self.top_k_noisy_seq}_{self.mode}_{self.tokenizer.__class__.__name__}_{self.max_input_length}_{self.max_output_length}"
+                f"cached_{self.name}_noise{self.noisy_dir_name}_{self.mode}_{self.tokenizer.__class__.__name__}_{self.max_input_length}_{self.max_output_length}"
                 f"{'_multitask' if self.data_args.multitask else ''}.pth"
             )
 
@@ -290,7 +295,9 @@ class NoisyBaseDataset(BaseDataset):
 
                 else:
                     self.load_schema()   # here the dataset can load information such as entity/relation types
-                    self.examples = self.load_data(mode=self.mode, seed=self.seed, top_k_noisy_seq=self.top_k_noisy_seq)
+                    self.examples = self.load_data(mode=self.mode, seed=self.seed, 
+                                                   inputs_fp=self.inputs_fp, viterbi_paths_fp=self.viterbi_paths_fp,
+                                                   viterbi_scores_fp=self.viterbi_scores_fp)
 
                     # assign examples to this dataset
                     for example in self.examples:
@@ -306,10 +313,21 @@ class NoisyBaseDataset(BaseDataset):
                         # save data
                         self.save_data(cached_data_file)
 
+                # deduplicate self.examples
+                dedup_examples = []
+                for i, example in enumerate(self.examples):
+                    if self.clean_bool[i]:
+                        dedup_examples.append(example)
+                self.examples = dedup_examples
+                logging.info(f"🧽 Deduplicated to {len(self.examples)} examples for split {self.mode}")
+
                 # shuffle indices
                 self.indices = list(range(len(self.examples)))
                 if self.seed is not None and self.shuffle:
                     random.shuffle(self.indices)
+                    logging.info(f"🃏 Shuffling the examples for split {self.mode}")
+                else:
+                    logging.info(f"❌ No shuffling for split {self.mode}")
 
                 # compute effective size of the dataset
                 self.effective_size = round(self.train_subset * len(self.examples))
@@ -318,7 +336,7 @@ class NoisyBaseDataset(BaseDataset):
         else:
             super().load_data_init()
 
-    def load_data(self, mode: str, seed: int = None, top_k_noisy_seq: int = 1) -> List[InputExample]:
+    def load_data(self, mode: str, seed: int = None, inputs_fp: str = None, viterbi_paths_fp: str = None, viterbi_scores_fp: str = None) -> List[InputExample]:
         """
         Load all data, where 'mode' is a list of comma-separated splits to use.
         """
@@ -331,43 +349,62 @@ class NoisyBaseDataset(BaseDataset):
             splits = mode
 
         for split in splits:
-            examples += self.load_data_single_split(split, seed=seed, top_k_noisy_seq=top_k_noisy_seq)
+            examples += self.load_data_single_split(split, seed=seed, 
+                                                    inputs_fp=inputs_fp, viterbi_paths_fp=viterbi_paths_fp, viterbi_scores_fp=viterbi_scores_fp)
 
         return examples
     
     def compute_features(self, max_input_length: int, max_output_length: int, multitask: bool = False):
-        input_sentences = [self.input_format.format_input(example, multitask=multitask) for example in self.examples]
-        output_sentences = list()
-        noisy_output_sentences = list()
-        noisy_output_sentences_weights = list()
-        for example in self.examples:
-            output = self.output_format.format_output(example)
-            output_sentences.append(output['output_sentence'])
-            if output['top_k_noisy_output_sentences']:
-                assert len(output['top_k_noisy_output_sentences']) == len(example.top_k_noise_weights)
-                noisy_output_sentences.append(output['top_k_noisy_output_sentences'])
-                noisy_output_sentences_weights.append(example.top_k_noise_weights)
+        # called after self.load_data
+        # output is stored at self.features
 
-        input_tok = self.tokenizer.batch_encode_plus(
-            input_sentences,
-            max_length=max_input_length,
-            return_tensors='pt',
-            padding='max_length',
-            truncation=True,
-        )
+        input_sentences = [self.input_format.format_input(example, multitask=multitask) for example in self.examples]
+        output_sentences = [self.output_format.format_output(example)['output_sentence'] for example in self.examples]
+
+        input_tok = self.tokenizer.batch_encode_plus(input_sentences,max_length=max_input_length,return_tensors='pt',padding='max_length',truncation=True)
         self._warn_max_sequence_length(max_input_length, input_sentences, "input")
 
-        output_tok = self.tokenizer.batch_encode_plus(
-            output_sentences,
-            max_length=max_output_length,
-            return_tensors='pt',
-            padding='max_length',
-            truncation=True,
-        )
+        output_tok = self.tokenizer.batch_encode_plus(output_sentences,max_length=max_output_length,return_tensors='pt',padding='max_length',truncation=True)
         self._warn_max_sequence_length(max_output_length, output_sentences, "output")
         
+        # map input tokens to noisy output ids and their weights and total LSE
+        if self.mode == "train":
+            gold_output_sentences = [self.output_format.format_output(example)['gold_output_sentence'] for example in self.examples]
+            self.clean_bool = list() # purpose: remove duplicates
+            self.INPUT_IDS_TO_OUTPUT_IDS = collections.defaultdict(list)
+            self.INPUT_IDS_TO_WEIGHTS = collections.defaultdict(list)
+            self.INPUT_IDS_TO_GOLD = dict()
+            for i in range(len(self.examples)):
+                input_ids = tuple(input_tok['input_ids'][i].tolist())
+                if input_ids not in self.INPUT_IDS_TO_OUTPUT_IDS:
+                    self.clean_bool.append(True)
+                else:
+                    self.clean_bool.append(False)
+
+                self.INPUT_IDS_TO_OUTPUT_IDS[input_ids].append(output_tok['input_ids'][i])
+                self.INPUT_IDS_TO_WEIGHTS[input_ids].append((self.examples[i].noise_weight, self.examples[i].total_LSE_noise_weight))
+                self.INPUT_IDS_TO_GOLD[input_ids] = gold_output_sentences[i]
+
+            ### NOTE: ontonotes, ncbi has duplicate inputs
+            # for v in self.INPUT_IDS_TO_OUTPUT_IDS.values():
+            #     print(len(v))
+
+            features = []
+            for i, (sentence_input_ids, att_mask, label_input_ids) in enumerate(zip(input_tok.input_ids, input_tok.attention_mask,
+                                                                 output_tok.input_ids)):
+                if self.clean_bool[i]:
+                    label_ids = label_input_ids.tolist()
+                    features.append(InputFeatures(
+                        input_ids=sentence_input_ids.tolist(),
+                        attention_mask=att_mask.tolist(),
+                        label_ids=label_ids
+                    ))
+
+            return features
+
         assert input_tok.input_ids.size(0) == output_tok.input_ids.size(0)
 
+        #### original TANL: get features
         features = []
         for sentence_input_ids, att_mask, label_input_ids in zip(input_tok.input_ids, input_tok.attention_mask,
                                                                  output_tok.input_ids):
@@ -378,22 +415,30 @@ class NoisyBaseDataset(BaseDataset):
                 label_ids=label_ids
             ))
 
-        # if noisy
-        if noisy_output_sentences:
-            self.input_ids_to_noisy_output_ids = dict()
-            for i, input_ids in enumerate(input_tok['input_ids']):
-                self.input_ids_to_noisy_output_ids[tuple(input_ids.tolist())] = \
-                    (self.tokenizer.batch_encode_plus(
-                        noisy_output_sentences[i],
-                        max_length=max_output_length,
-                        return_tensors='pt',
-                        padding='max_length',
-                        truncation=True,
-                    ).input_ids, # list of top k sequences of token_ids
-                    noisy_output_sentences_weights[i]) # weights for each sequence
-        else:
-            self.input_ids_to_noisy_output_ids = None
-        return features
-        
+        # ### commented out (useful when we treat each noisy output as a single instance)
+        # ### if noisy
 
+        # self.OUTPUT_IDS_TO_EXAMPLES = dict()
+        # for i in range(len(self.examples)):
+        #     self.OUTPUT_IDS_TO_EXAMPLES[tuple(output_tok['input_ids'][i].tolist())] = self.examples[i]
+
+        # example_noise_weights = list()
+        # example_total_LSE_noise_weights = list()
+        # for example in self.examples:
+        #     if example.noise_weight is not None and example.total_LSE_noise_weight is not None:
+        #         example_noise_weights.append(example.noise_weight)
+        #         example_total_LSE_noise_weights.append(example.total_LSE_noise_weight)
+
+        # if not self.is_eval and self.examples[0].gold_entities is not None: # heuristic if-condition
+        #     gold_output_sentences = [self.output_format.format_output(example)['gold_output_sentence'] for example in self.examples]
+        
+        # if example_total_LSE_noise_weights:
+        #     self.NOISY_OUTPUT_IDS_TO_WEIGHTS = dict()
+        #     self.NOISY_OUTPUT_IDS_TO_GOLD = dict()
+        #     for i, input_ids in enumerate(output_tok['input_ids']):
+        #         self.NOISY_OUTPUT_IDS_TO_WEIGHTS[tuple(input_ids.tolist())] = (example_noise_weights[i], example_total_LSE_noise_weights[i])
+        #         self.NOISY_OUTPUT_IDS_TO_GOLD[tuple(input_ids.tolist())] = gold_output_sentences[i]
+        # else:
+        #     self.NOISY_OUTPUT_IDS_TO_WEIGHTS = None
+        return features
         

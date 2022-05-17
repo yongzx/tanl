@@ -225,10 +225,8 @@ def main():
                 )
                 datasets.append(dataset)
             train_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
+            train_dataset = torch.load("/users/zyong2/data/zyong2/ws/data/processed/004/train_dataset_get_most_probable.pt")
             
-            # logging.info(tokenizer.convert_ids_to_tokens(train_dataset[1].input_ids))
-            # logging.info(tokenizer.convert_ids_to_tokens(train_dataset[1].label_ids))
-
             datasets = []
             for dataset_name in dataset_names:
                 logging.info(f'Process dataset {dataset_name} (dev)')
@@ -242,6 +240,12 @@ def main():
             eval_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
 
             # construct trainer
+            logging.info(f"check train_dataset input: {tokenizer.decode(train_dataset[0].input_ids, skip_special_tokens=True)}")
+            logging.info(f"check train_dataset output: {tokenizer.decode(train_dataset[0].label_ids, skip_special_tokens=True)}")
+            logging.info(f"check train_dataset input: {tokenizer.decode(train_dataset[1].input_ids, skip_special_tokens=True)}")
+            logging.info(f"check train_dataset output: {tokenizer.decode(train_dataset[1].label_ids, skip_special_tokens=True)}")
+            print(train_dataset[0])
+
             trainer = Trainer(
                 model=model,
                 args=training_args,
@@ -311,10 +315,18 @@ def main():
                 else:
                     logging.info(f'Evaluate on {dataset_name} {split}')
 
+                # print("try out....")
+                # sent = "walked We do know that Mr. Clinton worked right up until the end, granting more than 100 pardons as he walked out the door." 
+                # input_ids = tokenizer(sent, return_tensors='pt').input_ids.to("cuda")
+                # model = model.to("cuda")
+                # outputs = model.generate(input_ids)
+                # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+
                 res = evaluate(
                     model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
                     seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
                 )
+
                 # store results
                 evaluation_results[comb].append(res)
 

@@ -191,6 +191,7 @@ def viterbi_decode(tag_sequence: torch.Tensor, transition_matrix: torch.Tensor, 
         # Best pairwise potential path score from the previous timestep. 
         max_k = min(summed_potentials.size()[0], top_k)
         scores, paths = torch.topk(summed_potentials, k=max_k, dim=0)
+
         # assert scores.size() == (n_permutations, num_tags)
         # assert paths.size() == (n_permutations, num_tags)
 
