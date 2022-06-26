@@ -17,7 +17,9 @@ from typing import Dict, List, Tuple, Set
 import torch
 from transformers import PreTrainedTokenizer
 
-from arguments import DataTrainingArguments
+import pathlib
+
+from arguments import DataTrainingArguments, NoiseAwareArguments
 from input_example import InputFeatures, EntityType, RelationType, Entity, Relation, Intent, InputExample, CorefDocument
 from base_dataset import BaseDataset, NoisyBaseDataset
 from utils import get_precision_recall_f1, viterbi_decode
@@ -38,6 +40,7 @@ def register_dataset(dataset_class):
 def load_dataset(
         dataset_name: str,
         data_args: DataTrainingArguments,
+        noise_aware_args: NoiseAwareArguments,
         tokenizer: PreTrainedTokenizer,
         split: str,
         max_input_length: int,
@@ -51,6 +54,9 @@ def load_dataset(
         viterbi_paths_fp: str = None,
         viterbi_scores_fp: str = None,
         top_k_noisy_seq: int = None,
+        load_noisy: bool = False,
+        data_start: int = None,
+        data_end: int = None
 ):
     """
     Load a registered dataset.
@@ -66,12 +72,16 @@ def load_dataset(
             seed=seed,
             shuffle=shuffle,
             data_args=data_args,
+            noise_aware_args=noise_aware_args,
             is_eval=is_eval,
             noisy_dir_name=noisy_dir_name,
             inputs_fp=inputs_fp,
             viterbi_paths_fp=viterbi_paths_fp,
             viterbi_scores_fp=viterbi_scores_fp,
-            top_k_noisy_seq=top_k_noisy_seq
+            top_k_noisy_seq=top_k_noisy_seq, 
+            load_noisy=load_noisy,
+            data_start=data_start,
+            data_end=data_end
         )
     else:
         return DATASETS[dataset_name](
@@ -261,9 +271,9 @@ class JointERDataset(BaseDataset):
         results = Counter()
 
         for i, (example, output_sentence) in enumerate(self.generate_output_sentences(data_args, model, device, batch_size)):
-            if i in [0, 1, 2, 3, 4]:
+            if i < 100:
                 logging.info(f"Example: {example}")
-                logging.info(f"output_sentence: {output_sentence}")
+                logging.info(f"Inference output_sentence: {output_sentence}")
                 
             new_result = self.evaluate_example(
                     example=example,
@@ -272,6 +282,8 @@ class JointERDataset(BaseDataset):
                     tokenizer=self.tokenizer,
                 )
             results += new_result
+        
+        assert False
 
         entity_precision, entity_recall, entity_f1 = get_precision_recall_f1(
             num_correct=results['correct_entities'],
@@ -2753,11 +2765,10 @@ class NoisyJointERDataset(NoisyBaseDataset):
         Evaluate model on this dataset.
         """
         results = Counter()
-
         for i, (example, output_sentence) in enumerate(self.generate_output_sentences(data_args, model, device, batch_size)):
-            if i in [0, 1, 2, 3, 4]:
-                logging.info(f"Example: {example}")
-                logging.info(f"output_sentence: {output_sentence}")
+            if i < 5:
+                logging.info(f"\nGold: {self.output_format.format_output(example)['output_sentence']}")
+                logging.info(f"Predicted: {output_sentence}")
 
             new_result = self.evaluate_example(
                     example=example,
@@ -2835,16 +2846,18 @@ class NoisyNERDataset(NoisyJointERDataset):
     num2labels = ...
     label_2_entity_types = ...
 
-    def load_data_single_split(self, split: str, seed: int = None, inputs_fp: str = None, viterbi_paths_fp: str = None, viterbi_scores_fp: str = None) -> List[InputExample]:
+    def load_data_single_split(self, split: str, seed: int = None, inputs_fp: str = None, 
+                               viterbi_paths_fp: str = None, viterbi_scores_fp: str = None, load_noisy: bool = False, 
+                               data_start: int = None, data_end: int = None) -> List[InputExample]:
         """
-        Load data for a single split (train, dev, or test).
+        Load data for a single split (train, noisy_train, dev, or test).
         """
         file_path = f"{self.data_dir()}/{split}.pt"
         data = torch.load(file_path)
 
         raw_examples = []
         examples_to_noisy_outputs = []
-        if split != 'train':
+        if split != 'train' or not load_noisy:
             for instance in data:
                 # instance['tags'] are the gold labels
                 tokens, labels = instance['tokens'], instance['tags']
@@ -2855,10 +2868,14 @@ class NoisyNERDataset(NoisyJointERDataset):
 
             # get viterbi paths and viterbi scores for all instances
             viterbi_paths = torch.load(viterbi_paths_fp)  # (topk, token_lengths_from_all_instances)
-            viterbi_scores = torch.load(viterbi_scores_fp)  # (topk, instances)
+            if not viterbi_scores_fp:
+                viterbi_scores = torch.ones(viterbi_paths.shape[0], len(data))
+            else:
+                viterbi_scores = torch.load(viterbi_scores_fp)  # (topk, instances)
             assert viterbi_paths.shape[0] == viterbi_scores.shape[0]
             assert viterbi_scores.shape[1] == len(data)
-            logging.info(f"Viterbi Paths loaded from {viterbi_scores_fp}")
+            logging.info(f"Viterbi Paths loaded from {viterbi_paths_fp}")
+            logging.info(f"Viterbi Scores loaded from {viterbi_scores_fp}")
             
             # get K viterbi paths and viterbi scores for each instance
             # TODO: if -1 exists in viterbi paths, remove the particular path from being added to the examples_to_noisy_outputs
@@ -2885,9 +2902,24 @@ class NoisyNERDataset(NoisyJointERDataset):
                 labels = [self.label_2_entity_types[label] for label in labels]  # done in self.num2labels
                 raw_examples.append((tokens, labels)) # labels here are gold labels
 
+        if data_start is None:
+            data_start = 0
+        if data_end is None:
+            data_end = len(raw_examples)
+        raw_examples = raw_examples[data_start:data_end]
         logging.info(f"Loaded {len(raw_examples)} sentences for split {split} of {self.name}")
         
+        # load example for each sentence
         examples = []
+        if examples_to_noisy_outputs and viterbi_paths_fp:
+            # if there's cached noisy data, return it
+            filename = f"processed_examples_{pathlib.Path(viterbi_paths_fp).stem.split('_')[1]}_start{data_start}_end{data_end}"
+            processed_examples_fp = f"{pathlib.Path(viterbi_paths_fp).parent}/{filename}.pt"
+            if pathlib.Path(processed_examples_fp).is_file():
+                examples = torch.load(processed_examples_fp)
+                logging.info(f"Loaded cached {len(examples)} examples for split {split} of {self.name}")
+                return examples
+
         for i, (tokens, labels) in enumerate(raw_examples):
             assert len(tokens) == len(labels)
 
@@ -2982,7 +3014,13 @@ class NoisyNERDataset(NoisyJointERDataset):
                     entities=entities, # replace with entities (for gold tags)
                     relations=[]
                 )
-                examples.append(example)
+                examples.append(example)        
+        
+        if examples_to_noisy_outputs and viterbi_paths_fp is not None:
+            filename = f"processed_examples_{pathlib.Path(viterbi_paths_fp).stem.split('_')[1]}_start{data_start}_end{data_end}"
+            processed_examples_fp = f"{pathlib.Path(viterbi_paths_fp).parent}/{filename}.pt"
+            torch.save(examples, processed_examples_fp)
+        
         logging.info(f"Processed {len(examples)} examples for split {split} of {self.name}")
         return examples
 

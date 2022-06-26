@@ -153,6 +153,12 @@ def main():
     if data_args.max_output_seq_length != data_args.max_seq_length:
         output_dir += f'-{data_args.max_output_seq_length}'
 
+    if data_args.data_start is not None:
+        output_dir += f'-start{data_args.data_start}'
+
+    if data_args.data_end is not None:
+        output_dir += f'-end{data_args.data_end}'
+
     if training_args.learning_rate != 5e-4:
         output_dir += f'-lr{training_args.learning_rate}'
 
@@ -250,14 +256,18 @@ def main():
             for dataset_name in dataset_names:
                 logging.info(f'Process noisy dataset {dataset_name} (train)')
                 noise_dataset = load_dataset(
-                    dataset_name, data_args, split=data_args.train_split,
+                    dataset_name, data_args, noise_aware_args=noise_aware_args, 
+                    split=data_args.train_split,
                     max_input_length=data_args.max_seq_length, max_output_length=data_args.max_output_seq_length,
                     tokenizer=tokenizer, seed=ep_idx, train_subset=data_args.train_subset, 
                     noisy_dir_name=noise_aware_args.noisy_dir_name,
                     inputs_fp=noise_aware_args.inputs_fp,
                     viterbi_paths_fp=noise_aware_args.viterbi_paths_fp,
                     viterbi_scores_fp=noise_aware_args.viterbi_scores_fp,
-                    top_k_noisy_seq=noise_aware_args.top_k_noisy_seq
+                    top_k_noisy_seq=noise_aware_args.top_k_noisy_seq,
+                    load_noisy=True,
+                    data_start=0,
+                    data_end=1
                 )
                 datasets.append(noise_dataset) # FIXME: noise_dataset is called later on in loss function
             train_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
@@ -266,10 +276,10 @@ def main():
             for dataset_name in dataset_names:
                 logging.info(f'Process dataset {dataset_name} (dev)')
                 dev_dataset = load_dataset(
-                    dataset_name, data_args, split=data_args.val_split,
+                    dataset_name, data_args, noise_aware_args=noise_aware_args, split=data_args.val_split,
                     max_input_length=data_args.max_seq_length_eval,
                     max_output_length=data_args.max_output_seq_length_eval,
-                    tokenizer=tokenizer, seed=ep_idx, shuffle=False, is_eval=True,
+                    tokenizer=tokenizer, seed=ep_idx, shuffle=False, is_eval=True
                 )
                 datasets.append(dev_dataset) # FIXME: dev_dataset is called later on.
             eval_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
@@ -277,7 +287,7 @@ def main():
             class NoiseAwareTrainer(Trainer):
                 def __init__(self, *trainer_args, **trainer_kwargs):
                     super().__init__(*trainer_args, **trainer_kwargs)
-                    self.debug_flag = args.debug_loss_flag
+                    self.debug_loss_flag = args.debug_loss_flag
                     self.use_accum = args.use_accum
 
                 def compute_custom_loss(self, model, inputs, return_outputs=False):
@@ -293,22 +303,29 @@ def main():
                         
                         # get noisy outputs and their corresponding weights
                         output_ids = noise_dataset.INPUT_IDS_TO_OUTPUT_IDS[input_ids]
-                        weights = noise_dataset.INPUT_IDS_TO_WEIGHTS[input_ids]
+                        raw_weights = noise_dataset.INPUT_IDS_TO_WEIGHTS[input_ids]
+                        weights, total_LSE_weights = zip(*raw_weights)
+                        weights, total_LSE_weights = torch.Tensor(weights).to(device), torch.Tensor(total_LSE_weights).to(device)
+                        output_ids = torch.stack(output_ids)
 
                         noise_aware_loss = 0.
-                        for j in range(len(output_ids)):
-                            # get loss of the LM model
-
-                            outputs = model(input_ids=torch.unsqueeze(inputs['input_ids'][i], dim=0).to(device), 
-                                            labels=torch.unsqueeze(output_ids[j], dim=0).to(device),
-                                            attention_mask=torch.unsqueeze(inputs['attention_mask'][i], dim=0).to(device))
-
-                            # weighted loss
-                            weight, total_LSE_weight = weights[j]
-                            # total_loss += torch.exp(weight + torch.log(outputs['loss']) - total_LSE_weight)
-                            # print(j, torch.exp(weight + torch.log(outputs['loss']) - total_LSE_weight))
-                            noise_aware_loss += torch.exp(weight + torch.log(outputs['loss']) - total_LSE_weight)
-                            if (j > 0 and j % noise_aware_args.when_call_backward == 0) or j == len(output_ids) - 1:
+                        bsz = noise_aware_args.bsz
+                        for j in range(len(output_ids) // bsz + 1):
+                            if j * bsz >= len(output_ids):
+                                break
+                            labels = output_ids[(j * bsz):((j + 1) * bsz)].to(device)
+                            outputs = model(input_ids=inputs['input_ids'][i].repeat(labels.size(0), 1).to(device), 
+                                            attention_mask=inputs['attention_mask'][i].repeat(labels.size(0), 1).to(device),
+                                            labels=labels,
+                                            return_dict=True)   
+                            lm_logits = outputs.logits.to(device)
+                            
+                            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
+                            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))      
+                            loss = torch.mean(torch.stack(torch.split(loss, split_size_or_sections=labels.size(-1))), dim=-1)
+                            noise_aware_loss += torch.sum(torch.exp(weights[(j * bsz):((j + 1) * bsz)] + torch.log(loss) - total_LSE_weights[(j * bsz):((j + 1) * bsz)]))
+                            
+                            if (j > 0 and (j * bsz) % noise_aware_args.when_call_backward == 0):
                                 # print("noise_aware_loss:", noise_aware_loss)
                                 noise_aware_loss /= (self.args.gradient_accumulation_steps * inputs['input_ids'].shape[0])
                                 # noise_aware_loss /= backward_count  # the loss is already scaled by the weighted loss (https://stackoverflow.com/questions/62067400/understanding-accumulated-gradients-in-pytorch)
@@ -316,7 +333,7 @@ def main():
                                 total_loss += noise_aware_loss
                                 noise_aware_loss = 0.  # reset noise_aware_loss
 
-                            if self.debug_flag:
+                            if self.debug_loss_flag:
                                 print(f"{f'Example {i} ({j}-th noisy instance)':-<100}")
                                 print(f"training input_ids:", tokenizer.decode(inputs['input_ids'][i].tolist(), skip_special_tokens=True))
                                 print(f"training gold ⭐️ sentence:", noise_dataset.INPUT_IDS_TO_GOLD[input_ids])
@@ -326,11 +343,23 @@ def main():
                                     print(f"model inference output 👉:", tokenizer.decode(model.module.generate(torch.unsqueeze(inputs['input_ids'][i], dim=0))[0], skip_special_tokens=True))
                                 else:
                                     print(f"model inference output 👉:", tokenizer.decode(model.generate(torch.unsqueeze(inputs['input_ids'][i], dim=0))[0], skip_special_tokens=True))
-                                print(f"weighted noise_aware_loss = {torch.exp(weight + torch.log(outputs['loss']) - total_LSE_weight).item()}\n"
-                                    f"output.loss = {outputs.loss.item()} with weight = {weight} and total LSE weight = {total_LSE_weight}")
-                                print()
-                        assert False 
-                        assert noise_aware_loss == 0.  # ensure no lingering loss not being called backward
+                                
+                                print("training input_weight:" )
+                                # print(f"weighted noise_aware_loss = {torch.exp(weight + torch.log(outputs['loss']) - total_LSE_weight).item()}\n"
+                                #     f"output.loss = {outputs.loss.item()} with weight = {weight} and total LSE weight = {total_LSE_weight}")
+                                print(weights[(j * bsz):((j + 1) * bsz)])
+                        
+                        if noise_aware_loss != 0.:
+                            noise_aware_loss /= (self.args.gradient_accumulation_steps * inputs['input_ids'].shape[0])
+                            noise_aware_loss.backward()
+                            total_loss += noise_aware_loss
+                            noise_aware_loss = 0.  # reset noise_aware_loss
+                    
+                        # if self.debug_loss_flag and j > 5:
+                        #     print("Finish printing one batch")
+                        #     assert False
+
+
                     return total_loss
 
                 def training_step(self, model, inputs):
@@ -413,8 +442,33 @@ def main():
                 
                 best_ckpt_dir = None
                 best_f1_score = float('-inf')
+                train_results = list()
                 all_results = list()
                 all_no_tf_loss = list()
+
+                if training_args.do_eval_train:
+                    for comb in itertools.product(['train'], evaluation_dirs, eval_dataset_names):
+                        split, evaluation_dir, dataset_name = comb
+                        model_dir = os.path.join(episode_output_dir, evaluation_dir)
+                        model = AutoModelForSeq2SeqLM.from_pretrained(
+                                model_dir,
+                                config=config,
+                            )
+            
+                        logging.info(f"{f'[Train data] 🏃🏻‍♂️ Evaluating {evaluation_dir}':=^100}")
+                        res = evaluate(
+                            model=model, dataset_name=dataset_name, data_args=data_args, noise_aware_args=noise_aware_args, tokenizer=tokenizer, split=split,
+                            seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu, load_noisy=False
+                        )
+                        train_results.append(res['entity_f1'])
+
+                    if "wandb" in training_args.report_to:
+                        wandb.init(name=training_args.run_name, reinit=True, settings=wandb.Settings(start_method='fork'))
+                        for n_iter in range(int(training_args.num_train_epochs)):
+                            wandb.log({"eval/train_post_f1": train_results[n_iter], # "eval/no_tf_loss":  all_no_tf_loss[n_iter],
+                                    "eval/post_global_steps": int(evaluation_dirs[n_iter].split('-')[-1])})
+                    assert False
+                    
                 # use the dev set to select the best checkpoint
                 for comb in itertools.product(['dev'], evaluation_dirs, eval_dataset_names):
                     split, evaluation_dir, dataset_name = comb
@@ -424,19 +478,19 @@ def main():
                             config=config,
                         )
                     
-                    logging.info(f"{f'🏃🏻‍♂️ Evaluating {evaluation_dir}':=^100}")
+                    logging.info(f"{f'[Dev data] 🏃🏻‍♂️ Evaluating {evaluation_dir}':=^100}")
                     res = evaluate(
-                        model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
+                        model=model, dataset_name=dataset_name, data_args=data_args, noise_aware_args=noise_aware_args, tokenizer=tokenizer, split=split,
                         seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
                     )
 
-                    no_tf_loss = evaluate_no_teacher_forcing_loss(
-                        model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
-                        seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
-                    )
+                    # no_tf_loss = evaluate_no_teacher_forcing_loss(
+                    #     model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
+                    #     seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
+                    # )
 
                     all_results.append(res['entity_f1'])
-                    all_no_tf_loss.append(no_tf_loss)
+                    # all_no_tf_loss.append(no_tf_loss)
                     
 
                     if res['entity_f1'] > best_f1_score:
@@ -451,8 +505,7 @@ def main():
                 if "wandb" in training_args.report_to:
                     wandb.init(name=training_args.run_name, reinit=True, settings=wandb.Settings(start_method='fork'))
                     for n_iter in range(int(training_args.num_train_epochs)):
-                        wandb.log({"eval/dev_post_f1": all_results[n_iter], 
-                                "eval/no_tf_loss":  all_no_tf_loss[n_iter],
+                        wandb.log({"eval/dev_post_f1": all_results[n_iter], # "eval/no_tf_loss":  all_no_tf_loss[n_iter],
                                 "eval/post_global_steps": int(evaluation_dirs[n_iter].split('-')[-1])})
                     
                 if best_ckpt_dir is not None:
@@ -491,6 +544,8 @@ def main():
 
             # evaluate all possible combinations of dev/test, model, and datasets
             print("evaluation_dirs:", evaluation_dirs)
+            print("evaluation_splits:", evaluation_splits)
+            assert False
             for comb in itertools.product(evaluation_splits, evaluation_dirs, eval_dataset_names):
                 split, evaluation_dir, dataset_name = comb
                 model_dir = os.path.join(episode_output_dir, evaluation_dir)
@@ -508,8 +563,8 @@ def main():
                     logging.info(f'Evaluate on {dataset_name} {split}')
 
                 res = evaluate(
-                    model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
-                    seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
+                    model=model, dataset_name=dataset_name, data_args=data_args, noise_aware_args=noise_aware_args, tokenizer=tokenizer, split=split,
+                    seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu, load_noisy=False
                 )
                 # store results
                 evaluation_results[comb].append(res)

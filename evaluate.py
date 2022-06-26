@@ -44,8 +44,8 @@ def print_results(results: dict):
         logging.info(s)
 
 
-def evaluate(model, dataset_name: str, data_args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, split: str,
-             seed: int, gpu: int, batch_size: int) -> Dict[str, float]:
+def evaluate(model, dataset_name: str, data_args: DataTrainingArguments, noise_aware_args, tokenizer: PreTrainedTokenizer, split: str,
+             seed: int, gpu: int, batch_size: int, load_noisy: bool) -> Dict[str, float]:
     """
     Evaluate a model on some dataset.
     """
@@ -60,10 +60,10 @@ def evaluate(model, dataset_name: str, data_args: DataTrainingArguments, tokeniz
     logging.info(f'Max output length for evaluation: {data_args.max_output_seq_length_eval}')
 
     test_dataset = load_dataset(
-        dataset_name, data_args,
+        dataset_name, data_args, noise_aware_args,
         max_input_length=data_args.max_seq_length_eval,
         max_output_length=data_args.max_output_seq_length_eval,
-        tokenizer=tokenizer, split=split, seed=seed, shuffle=False, is_eval=True,
+        tokenizer=tokenizer, split=split, seed=seed, shuffle=False, is_eval=True, load_noisy=load_noisy
     )
 
     return test_dataset.evaluate_dataset(data_args=data_args, model=model, device=device, batch_size=batch_size)

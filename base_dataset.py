@@ -69,6 +69,7 @@ class BaseDataset(Dataset, ABC):
         self.is_eval = is_eval
         self.eval_nll = data_args.eval_nll
 
+        self.debug_print_all_instances = data_args.debug_print_all_instances
         self.mode = mode
         self.local_rank = local_rank
         self.overwrite_cache = overwrite_cache
@@ -269,17 +270,21 @@ class BaseDataset(Dataset, ABC):
 
 
 class NoisyBaseDataset(BaseDataset):
-    def __init__(self, noisy_dir_name, inputs_fp, viterbi_paths_fp, viterbi_scores_fp, top_k_noisy_seq,
-                 *args, **kwargs):
+    def __init__(self, noise_aware_args, noisy_dir_name, inputs_fp, viterbi_paths_fp, viterbi_scores_fp, top_k_noisy_seq, load_noisy,
+                 data_start, data_end, *args, **kwargs):
+        self.noise_aware_args = noise_aware_args
         self.noisy_dir_name = noisy_dir_name
         self.inputs_fp = inputs_fp
         self.viterbi_paths_fp = viterbi_paths_fp
         self.viterbi_scores_fp = viterbi_scores_fp
         self.top_k_noisy_seq = top_k_noisy_seq
+        self.load_noisy = load_noisy
+        self.data_start = data_start
+        self.data_end = data_end
         super().__init__(*args, **kwargs)
         
     def load_data_init(self):
-        if self.mode == "train":
+        if self.mode == "train" and self.load_noisy:
             cached_data_file = os.path.join(
                 self.data_dir(),
                 f"cached_{self.name}_noise{self.noisy_dir_name}_{self.mode}_{self.tokenizer.__class__.__name__}_{self.max_input_length}_{self.max_output_length}"
@@ -297,7 +302,10 @@ class NoisyBaseDataset(BaseDataset):
                     self.load_schema()   # here the dataset can load information such as entity/relation types
                     self.examples = self.load_data(mode=self.mode, seed=self.seed, 
                                                    inputs_fp=self.inputs_fp, viterbi_paths_fp=self.viterbi_paths_fp,
-                                                   viterbi_scores_fp=self.viterbi_scores_fp)
+                                                   viterbi_scores_fp=self.viterbi_scores_fp,
+                                                   load_noisy=self.load_noisy,
+                                                   data_start=self.data_start,
+                                                   data_end=self.data_end)
 
                     # assign examples to this dataset
                     for example in self.examples:
@@ -336,7 +344,9 @@ class NoisyBaseDataset(BaseDataset):
         else:
             super().load_data_init()
 
-    def load_data(self, mode: str, seed: int = None, inputs_fp: str = None, viterbi_paths_fp: str = None, viterbi_scores_fp: str = None) -> List[InputExample]:
+    def load_data(self, mode: str, seed: int = None, inputs_fp: str = None,
+                  viterbi_paths_fp: str = None, viterbi_scores_fp: str = None, 
+                  load_noisy: bool = False, data_start: int = None, data_end: int = None) -> List[InputExample]:
         """
         Load all data, where 'mode' is a list of comma-separated splits to use.
         """
@@ -349,8 +359,14 @@ class NoisyBaseDataset(BaseDataset):
             splits = mode
 
         for split in splits:
-            examples += self.load_data_single_split(split, seed=seed, 
-                                                    inputs_fp=inputs_fp, viterbi_paths_fp=viterbi_paths_fp, viterbi_scores_fp=viterbi_scores_fp)
+            examples += self.load_data_single_split(split, 
+                                                    seed=seed, 
+                                                    inputs_fp=inputs_fp, 
+                                                    viterbi_paths_fp=viterbi_paths_fp, 
+                                                    viterbi_scores_fp=viterbi_scores_fp, 
+                                                    load_noisy=load_noisy,
+                                                    data_start=data_start,
+                                                    data_end=data_end)
 
         return examples
     
@@ -368,8 +384,9 @@ class NoisyBaseDataset(BaseDataset):
         self._warn_max_sequence_length(max_output_length, output_sentences, "output")
         
         # map input tokens to noisy output ids and their weights and total LSE
-        if self.mode == "train":
+        if self.mode == "train" and self.load_noisy:
             gold_output_sentences = [self.output_format.format_output(example)['gold_output_sentence'] for example in self.examples]
+            self.INPUT_IDS_TO_INDEX_ID = dict()
             self.clean_bool = list() # purpose: remove duplicates
             self.INPUT_IDS_TO_OUTPUT_IDS = collections.defaultdict(list)
             self.INPUT_IDS_TO_WEIGHTS = collections.defaultdict(list)
@@ -380,15 +397,26 @@ class NoisyBaseDataset(BaseDataset):
                     self.clean_bool.append(True)
                 else:
                     self.clean_bool.append(False)
-
+                
+                self.INPUT_IDS_TO_INDEX_ID[input_ids] = i // self.noise_aware_args.top_k_noisy_seq
                 self.INPUT_IDS_TO_OUTPUT_IDS[input_ids].append(output_tok['input_ids'][i])
                 self.INPUT_IDS_TO_WEIGHTS[input_ids].append((self.examples[i].noise_weight, self.examples[i].total_LSE_noise_weight))
-                self.INPUT_IDS_TO_GOLD[input_ids] = gold_output_sentences[i]
+                self.INPUT_IDS_TO_GOLD[input_ids] = gold_output_sentences[i] # input_ids to gold sentence
 
             ### NOTE: ontonotes, ncbi has duplicate inputs
             # for v in self.INPUT_IDS_TO_OUTPUT_IDS.values():
             #     print(len(v))
 
+            if self.debug_print_all_instances:
+                for input_id in self.INPUT_IDS_TO_OUTPUT_IDS.keys():
+                    print(f"🚪 Input {self.INPUT_IDS_TO_INDEX_ID[input_id]}: {self.tokenizer.decode(input_id, skip_special_tokens=True)}")
+                    print(f"⭐️ Gold: {self.INPUT_IDS_TO_GOLD[input_id]}")
+                    for i, output_id in enumerate(self.INPUT_IDS_TO_OUTPUT_IDS[input_id]):
+                        print(f"Label Sequence: {self.tokenizer.decode(output_id, skip_special_tokens=True)}")
+                        print(f"Weight: {self.INPUT_IDS_TO_WEIGHTS[input_id][i]}")
+                    print("=========="*5)
+                assert False
+                    
             features = []
             for i, (sentence_input_ids, att_mask, label_input_ids) in enumerate(zip(input_tok.input_ids, input_tok.attention_mask,
                                                                  output_tok.input_ids)):

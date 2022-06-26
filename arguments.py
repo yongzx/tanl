@@ -26,6 +26,12 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={"help": "Zero-shot setting"}
     )
 
+    do_eval_train: bool = field(
+        default=False,
+        metadata={"help": "Evaluate model on training set"}
+    )
+
+
 @dataclass
 class NoiseAwareArguments:
     """
@@ -62,6 +68,11 @@ class NoiseAwareArguments:
         metadata={"help": "gradient accumulation within compute_noise_aware_loss function"}
     )
 
+    bsz: int = field(
+        default=4,
+        metadata={"help": "batch size for output_ids within compute_noise_aware_loss function"}
+    )
+
 
 
 @dataclass
@@ -96,6 +107,11 @@ class DataTrainingArguments:
     datasets: Optional[str] = field(
         default=None,
         metadata={"help": "Comma separated list of dataset names, for training."}
+    )
+
+    debug_print_all_instances: bool = field(
+        default=False,
+        metadata={'help': 'print all the training instances in the base_data_dir'}
     )
 
     data_dir: Optional[str] = field(
@@ -211,4 +227,12 @@ class DataTrainingArguments:
 
     eval_nll: bool = field(
         default=False, metadata={"help": "Evaluate using NLL (only applicable to certain datasets)"}
+    )
+
+    data_start: int = field(
+        default=None, metadata={"help": "examples[data_start:data_end]"}
+    )
+
+    data_end: int = field(
+        default=None, metadata={"help": "examples[data_start:data_end]"}
     )
