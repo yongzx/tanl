@@ -72,7 +72,12 @@ class DataTrainingArguments:
     )
 
     train_split: str = field(
-        default='train',
+        default='en-train',
+        metadata={"help": "The datasplit for training. Can be 'train', 'dev', 'test', etc."}
+    )
+
+    dev_split: str = field(
+        default='en-dev',
         metadata={"help": "The datasplit for training. Can be 'train', 'dev', 'test', etc."}
     )
 

@@ -234,7 +234,6 @@ class BaseDataset(Dataset, ABC):
                 example = self.get_example(current_id)
                 output_sentence = self.tokenizer.decode(prediction, skip_special_tokens=True,
                                                         clean_up_tokenization_spaces=False)
-
                 yield example, output_sentence
 
     @abstractmethod

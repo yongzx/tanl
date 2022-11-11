@@ -269,6 +269,15 @@ class JointERDataset(BaseDataset):
                 entity_precision_by_type.append(precision)
                 entity_recall_by_type.append(recall)
                 entity_f1_by_type.append(f1)
+        
+        D_f1_by_type = {}
+        for entity_type in self.entity_types.values():
+            precision, recall, f1 = get_precision_recall_f1(
+                num_correct=results['correct_entities', entity_type.natural],
+                num_predicted=results['predicted_entities', entity_type.natural],
+                num_gt=results['gt_entities', entity_type.natural],
+            )
+            D_f1_by_type[entity_type] = f1
 
         relation_precision, relation_recall, relation_f1 = get_precision_recall_f1(
             num_correct=results['correct_relations'],
@@ -298,6 +307,13 @@ class JointERDataset(BaseDataset):
                 'entity_macro_recall': np.mean(np.array(entity_recall_by_type)),
                 'entity_macro_f1': np.mean(np.array(entity_f1_by_type)),
             })
+
+        print("F1 by type (sorted by performance): =====")
+        list_f1_by_type = [(entity_type, f1) for entity_type, f1 in D_f1_by_type.items()]
+        list_f1_by_type.sort(key=lambda x: x[-1], reverse=True)
+        for entity_type, f1 in list_f1_by_type:
+            print(f"{entity_type.short} ({entity_type.natural}): {f1}")
+        print("=================")
 
         return res
 
@@ -1107,6 +1123,176 @@ class ACE2005NERDataset(NERDataset):
 
         logging.info(f"Loaded {len(examples)} sentences for split {split} of {self.name}")
         return examples
+
+
+@register_dataset
+class MultiCoNER(NERDataset):
+    name = 'multiconer'
+
+    # fine-grained
+    natural_entity_types = {
+        "OtherPROD": "item",
+        "Drink": "drink",
+        "Food": "food",
+        "Vehicle": "vehicle",
+        "Clothing": "clothing",
+        "OtherPER": "person",
+        "SportsManager": "sports manager",
+        "Cleric": "cleric",
+        "Politician": "politician",
+        "Athlete": "athlete",
+        "Artist": "artist",
+        "Scientist": "scientist",
+        "ORG": "organization",
+        "TechCORP": "tech corporation", 
+        "CarManufacturer": "car manufacturer",
+        "SportsGRP": "sports group",
+        "AerospaceManufacturer": "aerospace manufacturer",
+        "OtherCorp": "other corporation",
+        "PrivateCorp": "private corporation",
+        "PublicCorp": "public corporation",
+        "MusicalGRP": "musical group",
+        "VisualWork": "visual work",
+        "MusicalWork": "musical work",
+        "WrittenWork": "written work",
+        "ArtWork": "artwork",
+        "Software": "software",
+        "OtherCW": "creative work",
+        "Facility": "facility",
+        "OtherLOC": "location",
+        "HumanSettlement": "human settlement",
+        "Station": "station",
+        "Disease": "disease",
+        "Symptom": "symptom",
+        "AnatomicalStructure": "anatomy",
+        "MedicalProcedure": "medical procedure",
+        "Medication/Vaccine": "medication",
+
+    }
+
+    def load_data_single_split(self, split: str, seed: int = None) -> List[InputExample]:
+        """
+        Load data for a single split (train, dev, or test).
+        """
+        lang, split = split.split("-")
+        file_path = os.path.join(self.data_dir(), f'{lang}-{split}.conll')
+
+        raw_examples = []
+        tokens = []
+        labels = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                if line.startswith("-DOCSTART-") or line == "" or line == "\n" or line.startswith("# id"):
+                    if tokens:
+                        raw_examples.append((tokens, labels))
+                        tokens = []
+                        labels = []
+                else:
+                    splits = line.split(" _ _ ")
+                    tokens.append(splits[0])
+                    if len(splits) > 1:
+                        label = splits[-1].strip()
+                        if label == 'O':
+                            label = None
+                        labels.append(label)
+                    else:
+                        labels.append(None)
+
+            if tokens:
+                raw_examples.append((tokens, labels))
+
+        logging.info(f"Loaded {len(raw_examples)} sentences for split {split} of {self.name}")
+
+        examples = []
+        for i, (tokens, labels) in enumerate(raw_examples):
+            assert len(tokens) == len(labels)
+
+            # process labels
+            entities = []
+
+            current_entity_start = None
+            current_entity_type = None
+
+            for j, label in enumerate(labels + [None]):
+                previous_label = labels[j-1] if j > 0 else None
+                if (label is None and previous_label is not None) \
+                        or (label is not None and previous_label is None) \
+                        or (label is not None and previous_label is not None and (
+                            label[2:] != previous_label[2:] or label.startswith('B-') or label.startswith('S-')
+                        )):
+                    if current_entity_start is not None:
+                        # close current entity
+                        entities.append(Entity(
+                            id=len(entities),
+                            type=self.entity_types[current_entity_type],
+                            start=current_entity_start,
+                            end=j,
+                        ))
+
+                        current_entity_start = None
+                        current_entity_type = None
+
+                    if label is not None:
+                        # a new entity begins
+                        current_entity_start = j
+                        assert any(label.startswith(f'{prefix}-') for prefix in 'BIS')
+                        current_entity_type = label[2:]
+                        assert current_entity_type in self.entity_types
+
+            example = InputExample(
+                id=f'{split}-{i}',
+                tokens=tokens,
+                entities=entities,
+                relations=[],
+            )
+
+            examples.append(example)
+        return examples
+
+@register_dataset
+class MultiCoNERCoarse(MultiCoNER):
+    name = 'multiconer_coarse'
+    data_name = "multiconer"
+
+    # coarse-grained
+    natural_entity_types = {
+        "OtherPROD": "product",
+        "Drink": "product",
+        "Food": "product",
+        "Vehicle": "product",
+        "Clothing": "product",
+        "OtherPER": "person",
+        "SportsManager": "person",
+        "Cleric": "person",
+        "Politician": "person",
+        "Athlete": "person",
+        "Artist": "person",
+        "Scientist": "person",
+        "ORG": "organization",
+        "TechCORP": "organization", 
+        "CarManufacturer": "organization",
+        "SportsGRP": "organization",
+        "AerospaceManufacturer": "organization",
+        "OtherCorp": "organization",
+        "PrivateCorp": "organization",
+        "PublicCorp": "organization",
+        "MusicalGRP": "organization",
+        "VisualWork": "creative work",
+        "MusicalWork": "creative work",
+        "WrittenWork": "creative work",
+        "ArtWork": "creative work",
+        "Software": "creative work",
+        "OtherCW": "creative work",
+        "Facility": "location",
+        "OtherLOC": "location",
+        "HumanSettlement": "location",
+        "Station": "location",
+        "Disease": "medical",
+        "Symptom": "medical",
+        "AnatomicalStructure": "medical",
+        "MedicalProcedure": "medical",
+        "Medication/Vaccine": "medical",
+    }
 
 
 @register_dataset

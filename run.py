@@ -18,13 +18,13 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser, AutoModelForSeq2SeqLM, Trainer
 
 from arguments import ModelArguments, DataTrainingArguments, TrainingArguments
-from datasets import load_dataset
+from tanl_datasets import load_dataset
 from evaluate import evaluate, get_avg_results, print_results
 from utils import get_episode_indices
 
 
 def main():
-    assert torch.cuda.is_available(), 'CUDA not available'
+    # assert torch.cuda.is_available(), 'CUDA not available'
 
     # parse arguments
     parser = argparse.ArgumentParser()
@@ -58,6 +58,7 @@ def main():
         'learning_rate': 5e-4,
         'logging_steps': 0,     # do not log by default
         'save_steps': 0,        # do not save checkpoints by default
+        "output_dir": "/users/zyong2/data/zyong2/semeval23/data/processed"
     }
 
     # the config file gives default values for the command line arguments
@@ -217,6 +218,8 @@ def main():
                 datasets.append(dataset)
 
             train_dataset = torch.utils.data.ConcatDataset(datasets) if training_args.do_train else None
+            print("Example training input:", tokenizer.decode(train_dataset[0].input_ids))
+            print("Example training output:", tokenizer.decode(train_dataset[0].label_ids))
 
             # construct trainer
             trainer = Trainer(
@@ -228,7 +231,7 @@ def main():
             # start trainer
             logging.info('Start training')
             trainer.train(
-                model_path=model_args.model_name_or_path
+                # model_path=model_args.model_name_or_path
             )
 
             # save model parameters
@@ -239,8 +242,9 @@ def main():
             # should we evaluate on dev, test, or both?
             evaluation_splits = []
             if training_args.do_eval:
-                evaluation_splits.append('dev')
+                evaluation_splits = list(data_args.dev_split.split(","))
             if training_args.do_predict:
+                assert False, "MultiCoNER doesn't have test split"
                 evaluation_splits.append('test')
 
             # should we evaluate on the final model and/or on all intermediate checkpoints?
@@ -275,6 +279,7 @@ def main():
             # evaluate all possible combinations of dev/test, model, and datasets
             for comb in itertools.product(evaluation_splits, evaluation_dirs, eval_dataset_names):
                 split, evaluation_dir, dataset_name = comb
+                _, evaluation_dir, dataset_name = comb
                 model_dir = os.path.join(episode_output_dir, evaluation_dir)
 
                 if args.evaluate_checkpoints or args.evaluate_last_checkpoint or args.evaluate_all or model is None:
@@ -289,6 +294,7 @@ def main():
                 else:
                     logging.info(f'Evaluate on {dataset_name} {split}')
 
+                print(f"Results for {split}:") # for easier tracking of F1 score breakdown
                 res = evaluate(
                     model=model, dataset_name=dataset_name, data_args=data_args, tokenizer=tokenizer, split=split,
                     seed=ep_idx, batch_size=training_args.per_device_eval_batch_size, gpu=args.gpu
